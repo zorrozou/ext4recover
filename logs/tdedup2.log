@@ -1,0 +1,69 @@
+nohup: ignoring input
+[15:29:26] lib loaded (v2). WORK=/mnt/work
+##################### T-DEDUP-2: --all dedup with aggressive #####################
+[15:29:26] mkfs /dev/vdb5 (opts: -b4096)
+[15:29:30] step1: write 100MB random file
+filefrag:
+Filesystem type is: ef53
+File size of /mnt/target/big is 104857600 (25600 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:        0..   25599:      34816..     60415:  25600:             last,eof
+/mnt/target/big: 1 extent found
+[15:29:31] step2: rm + sync
+[15:29:31] >>> v5 --all (will scan whole 500G partition, ~25min for aggressive)
+[15:29:31]     starting in background, will check periodically
+[15:29:31] v5 PID=273705, waiting...
+[15:30:21]   iter 1: still running,       00:50
+[15:31:11]   iter 2: still running,       01:40
+[15:32:01]   iter 3: still running,       02:30
+[15:32:51]   iter 4: still running,       03:20
+[15:33:41]   iter 5: still running,       04:10
+[15:34:31]   iter 6: still running,       05:00
+[15:35:21]   iter 7: still running,       05:50
+[15:36:11]   iter 8: still running,       06:40
+[15:37:01]   iter 9: still running,       07:30
+[15:37:52]   iter 10: still running,       08:20
+[15:38:42]   iter 11: still running,       09:10
+[15:39:32]   iter 12: still running,       10:00
+[15:40:22]   iter 13: still running,       10:50
+[15:41:12]   iter 14: still running,       11:40
+[15:42:02]   iter 15: still running,       12:30
+[15:42:52]   iter 16: still running,       13:20
+[15:43:42]   iter 17: still running,       14:10
+[15:44:32]   iter 18: still running,       15:00
+[15:45:22]   iter 19: still running,       15:50
+[15:46:12]   iter 20: still running,       16:40
+[15:47:02]   iter 21: still running,       17:30
+[15:47:52]   iter 22: still running,       18:20
+[15:48:42]   iter 23: still running,       19:10
+[15:49:32]   iter 24: still running,       20:00
+[15:50:22]   iter 25: still running,       20:50
+[15:51:12]   iter 26: still running,       21:40
+[15:52:02]   iter 27: still running,       22:30
+[15:52:52]   iter 28: still running,       23:21
+[15:53:42]   iter 29: still running,       24:11
+[15:54:32]   iter 30: still running,       25:01
+[15:55:22]   iter 31: still running,       25:51
+[15:56:12]   iter 32: still running,       26:41
+[15:57:02]   iter 33: still running,       27:31
+[15:57:52]   iter 34: still running,       28:21
+[15:58:42]   iter 35: still running,       29:11
+[15:59:32]   iter 36: still running,       30:01
+[15:59:32] v5 still running after 30min, killing
+
+[15:59:32] === final stats ===
+[INFO] Journal recovered inode 12: 25600 blocks (104857600 bytes) -> /mnt/work/recover_out/tdedup2/big
+
+[15:59:32] === products ===
+total 2813976
+drwxrwxr-x  2 ubuntu ubuntu       4096 Jun  2 15:48 .
+drwxrwxr-x 37 ubuntu ubuntu       4096 Jun  2 15:34 ..
+-rw-r-----  1 root   root    629145600 Jun  2 15:30 aggressive_524432
+-rw-r-----  1 root   root   1073741824 Jun  2 15:48 aggressive_67141631
+-rw-r-----  1 root   root   1073741824 Jun  2 15:48 aggressive_67633136
+-rw-r-----  1 root   root    104857600 Jun  2 15:29 big
+-rw-r--r--  1 root   root          219 Jun  2 15:30 .ext4recover_checkpoint.json
+
+[15:59:32] === verify ===
+  OK   ino=12 size=104857600 big  -> big
+RESULT: 1/1 recovered (md5 match after size-trunc)

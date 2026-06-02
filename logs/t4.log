@@ -1,0 +1,76 @@
+nohup: ignoring input
+[12:43:45] lib loaded. WORK=/mnt/work
+##################### T4 unwritten extent (fallocate) #####################
+[12:43:45] mkfs /dev/vdb6 (opts: -b4096)
+[12:43:49] step1: create test files
+[12:43:49]   f_pre (fallocate 1G,no write) ino=12
+Filesystem type is: ef53
+File size of /mnt/target/f_pre is 1073741824 (262144 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:        0..   63487:      34816..     98303:  63488:             unwritten
+   1:    63488..  126975:     100352..    163839:  63488:      98304: unwritten
+   2:   126976..  190463:     165888..    229375:  63488:     163840: unwritten
+   3:   190464..  253951:     231424..    294911:  63488:     229376: unwritten
+   4:   253952..  262143:     296960..    305151:   8192:     294912: last,unwritten,eof
+[12:43:50]   f_part (fallocate 1G, write first 256M) ino=13
+Filesystem type is: ef53
+File size of /mnt/target/f_part is 1073741824 (262144 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:        0..   65535:     305152..    370687:  65536:            
+   1:    65536..  219135:     370688..    524287: 153600:             unwritten
+   2:   219136..  262143:     557056..    600063:  43008:     524288: last,unwritten,eof
+/mnt/target/f_part: 2 extents found
+[12:43:58]   f_full (fallocate 1G, fully written) ino=14
+Filesystem type is: ef53
+File size of /mnt/target/f_full is 1073741824 (262144 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:        0..  219135:     600064..    819199: 219136:            
+   1:   219136..  262143:     821248..    864255:  43008:     819200: last,eof
+/mnt/target/f_full: 2 extents found
+[12:44:00] step2: rm files
+[12:44:00] >>> ORIG ext4recover (test crash safety) ...
+14 0 32768 600064
+14 32768 32768 632832
+14 65536 32768 665600
+14 98304 32768 698368
+14 131072 32768 731136
+14 163840 32768 763904
+14 196608 22528 796672
+14 219136 32768 821248
+14 251904 10240 854016
+Recover success!
+[12:44:41] ORIG verify:
+  OK   ino=13 name=f_part
+  OK   ino=14 name=f_full
+RESULT: 2/2
+[12:44:44] >>> v5 --normal ...
+[INFO] Filename map: 1 entries found
+[INFO] === Phase 3: Traditional Extent Tree Recovery ===
+[INFO] === Recovery Statistics ===
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 0
+[INFO]   Orphan recovered: 0
+[INFO]   Aggressive recovered: 0
+[INFO] Files failed: 4
+[INFO] Filename mappings: 1
+[INFO] Recovery complete!
+[12:45:30] v5 normal verify:
+  OK   ino=13 name=f_part
+  OK   ino=14 name=f_full
+RESULT: 2/2
+[12:45:33] >>> v5 --journal ...
+[INFO] Scanned 262000 / 262144 journal blocks...
+[INFO] Journal scan complete. Recovered 3 files from journal.
+[INFO] === Recovery Statistics ===
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 3
+[INFO]   Orphan recovered: 0
+[INFO]   Aggressive recovered: 0
+[INFO] Files failed: 0
+[INFO] Filename mappings: 4
+[INFO] Recovery complete!
+[12:45:50] v5 journal verify:
+  OK   ino=13 name=f_part
+  OK   ino=14 name=f_full
+RESULT: 2/2
+##################### T4 DONE #####################

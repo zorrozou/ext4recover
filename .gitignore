@@ -1,0 +1,25 @@
+# build artifacts
+*.o
+*.a
+ext4recover
+ext4recover_v5
+ext4recover_v2
+ext4recover_v5_debug
+bgrep
+bgrep_demo
+bgrep_es_cfs_cfe
+bgrep_es_lucene87
+bgrep_foundationdb
+bgrep_non_zero
+
+# editor / OS
+*~
+.*.swp
+.DS_Store
+._*
+.vscode/
+.idea/
+
+# test artifacts
+/tmp_*
+*.log.tmp

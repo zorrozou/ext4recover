@@ -1,0 +1,22 @@
+# Makefile for ext4recover v0.5
+
+CC = gcc
+CFLAGS = -O2 -Wall -Wextra -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE
+LDFLAGS = -lext2fs -lcom_err -lpthread
+
+SRCS = ext4recover_v5.c orphan_recovery_v5.c journal_recovery_v5.c \
+       extent_validator_v5.c aggressive_scan_v5.c utils_v5.c recovered_intervals.c
+OBJS = $(SRCS:.c=.o)
+
+all: ext4recover_v5
+
+ext4recover_v5: $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
+
+%.o: %.c ext4_common_v5.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(OBJS) ext4recover_v5
+
+.PHONY: all clean

@@ -1,0 +1,44 @@
+nohup: ignoring input
+[15:11:30] lib loaded (v2). WORK=/mnt/work
+##################### T0a 大文件 baseline #####################
+[15:11:30] mkfs /dev/vdb1 (opts: -b4096 -N 262144)
+[15:11:35] writing 2GB bigfile (urandom)...
+[15:11:49] bigfile inode=12  extent form (filefrag):
+Filesystem type is: ef53
+File size of /mnt/target/bigfile is 2147483648 (524288 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:        0..   63487:      34816..     98303:  63488:            
+   1:    63488..  126975:     100352..    163839:  63488:      98304:
+   2:   126976..  190463:     165888..    229375:  63488:     163840:
+   3:   190464..  253951:     231424..    294911:  63488:     229376:
+   4:   253952..  481279:     296960..    524287: 227328:     294912:
+[15:11:49] extent count = 6 (需>4才能形成多级树/可被原程序恢复)
+[15:11:49] rm bigfile...
+[15:11:49] >>> running ORIGINAL ext4recover on /dev/vdb1 ...
+12 385024 32768 428032
+12 417792 32768 460800
+12 450560 30720 493568
+12 481280 32768 557056
+12 514048 10240 589824
+Recover success!
+[15:12:00] original recovered files:
+total 2097160
+drwxr-x--- 2 root   root         4096 Jun  2 15:11 .
+drwxrwxr-x 3 ubuntu ubuntu       4096 Jun  2 15:11 ..
+-rw-r----- 1 root   root   2147483648 Jun  2 15:11 12_file
+----- VERIFY (original) -----
+  OK   ino=12 size=2147483648 bigfile  -> 12_file
+RESULT: 1/1 recovered (md5 match after size-trunc)
+ORIG_RESULT=0
+[15:12:03] >>> running v5 --normal on /dev/vdb1 ...
+[INFO]   Journal recovered: 0
+[INFO]   Orphan recovered: 0
+[INFO]   Aggressive recovered: 0
+[INFO] Files failed: 1
+[INFO] Filename mappings: 1
+[INFO] Recovery complete!
+----- VERIFY (v5 --normal) -----
+  OK   ino=12 size=2147483648 bigfile  -> 12_file
+RESULT: 1/1 recovered (md5 match after size-trunc)
+V5NORMAL_RESULT=0
+##################### T0a DONE #####################

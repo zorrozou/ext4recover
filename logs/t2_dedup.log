@@ -1,0 +1,77 @@
+nohup: ignoring input
+[15:32:46] lib loaded (v2). WORK=/mnt/work
+##################### T2 v5 journal 救单级extent小文件 #####################
+[15:32:46] mkfs /dev/vdb6 (opts: -b4096)
+[15:32:50] step1: writing 10 small files (different sizes)
+[15:32:50]   f4k ino=1310722 size=4KB extents=1
+[15:32:50]   f16k ino=1310723 size=16KB extents=1
+[15:32:50]   f64k ino=1310724 size=64KB extents=1
+[15:32:50]   f100k ino=1310725 size=100KB extents=1
+[15:32:50]   f200k ino=1310726 size=200KB extents=1
+[15:32:50]   f256k ino=1310727 size=256KB extents=1
+[15:32:50]   f500k ino=1310728 size=500KB extents=1
+[15:32:50]   f1024k ino=1310729 size=1024KB extents=1
+[15:32:50]   f2048k ino=1310730 size=2048KB extents=1
+[15:32:50]   f4096k ino=1310731 size=4096KB extents=1
+[15:32:52] step2: rm small files (single-extent: inode-internal extent will be zeroed)
+[15:32:52] >>> A) ORIG ext4recover (expected: 0/10 - kernel semantic) ...
+Recover success!
+[15:33:32] ORIG verify:
+  MISS ino=1310722 name=f4k
+  MISS ino=1310723 name=f16k
+  MISS ino=1310724 name=f64k
+  MISS ino=1310725 name=f100k
+  MISS ino=1310726 name=f200k
+  MISS ino=1310727 name=f256k
+  MISS ino=1310728 name=f500k
+  MISS ino=1310729 name=f1024k
+  MISS ino=1310730 name=f2048k
+  MISS ino=1310731 name=f4096k
+RESULT: 0/10
+[15:33:32] >>> B) v5 --normal (expected: 0/10) ...
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 0
+[INFO]   Orphan recovered: 0
+[INFO]   Aggressive recovered: 0
+[INFO] Files failed: 10
+[15:34:12] v5 --normal verify:
+  MISS ino=1310722 name=f4k
+  MISS ino=1310723 name=f16k
+  MISS ino=1310724 name=f64k
+  MISS ino=1310725 name=f100k
+  MISS ino=1310726 name=f200k
+  MISS ino=1310727 name=f256k
+  MISS ino=1310728 name=f500k
+  MISS ino=1310729 name=f1024k
+  MISS ino=1310730 name=f2048k
+  MISS ino=1310731 name=f4096k
+RESULT: 0/10
+[15:34:12] >>> C) v5 --journal (expected: BREAKTHROUGH - recover from journal) ...
+[INFO] Scanned 258000 / 262144 journal blocks...
+[INFO] Scanned 259000 / 262144 journal blocks...
+[INFO] Scanned 260000 / 262144 journal blocks...
+[INFO] Scanned 261000 / 262144 journal blocks...
+[INFO] Scanned 262000 / 262144 journal blocks...
+[INFO] Journal scan complete. Recovered 7 files from journal.
+[INFO] === Recovery Statistics ===
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 7
+[INFO]   Orphan recovered: 0
+[INFO]   Aggressive recovered: 0
+[INFO] Files failed: 0
+[INFO] Filename mappings: 12
+[INFO] Dedup intervals: 5 distinct extents, 285 blocks total; 0 writes skipped (0 blocks)
+[INFO] Recovery complete!
+[15:34:21] v5 --journal verify:
+  OK   ino=1310722 name=f4k md5=2d7a61f0f2d21abdd86119f77f83c259
+  OK   ino=1310723 name=f16k md5=d6ffb8315874b900294905c662c0dfdb
+  OK   ino=1310724 name=f64k md5=8c0f6dfd700bdfc9a9d1996c83b9c2ab
+  OK   ino=1310725 name=f100k md5=5e5a16e4e9e1e4ea716c18336d6e926a
+  OK   ino=1310726 name=f200k md5=f76da8a99145389d4c81410f0f3f1dce
+  OK   ino=1310727 name=f256k md5=d912c340ddd977effa7b68ebe58bf6b5
+  OK   ino=1310728 name=f500k md5=64215db61efaeeb0f164be957eb4eddc
+  MISS ino=1310729 name=f1024k
+  MISS ino=1310730 name=f2048k
+  MISS ino=1310731 name=f4096k
+RESULT: 7/10
+##################### T2 DONE #####################

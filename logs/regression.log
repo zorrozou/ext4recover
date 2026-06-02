@@ -1,0 +1,41 @@
+nohup: ignoring input
+===== running t0a =====
+  exit=0
+    [INFO]   Orphan recovered: 0
+    [INFO]   Aggressive recovered: 0
+    [INFO] Files failed: 1
+    [INFO] Filename mappings: 1
+    [INFO] Recovery complete!
+    ----- VERIFY (v5 --normal) -----
+      FAIL ino=12 md5 mismatch (orig=3643db3af3c51d72707d49b2b1275e92 got=d41d8cd98f00b204e9800998ecf8427e) bigfile
+    RESULT: 0/1 recovered (md5 match after size-trunc)
+    V5NORMAL_RESULT=1
+    ##################### T0a DONE #####################
+
+===== running t2 =====
+  exit=0
+      MISS ino=524292 name=f64k
+      MISS ino=524293 name=f100k
+      MISS ino=524294 name=f200k
+      MISS ino=524295 name=f256k
+      MISS ino=524296 name=f500k
+      MISS ino=524297 name=f1024k
+      MISS ino=524298 name=f2048k
+      MISS ino=524299 name=f4096k
+    RESULT: 0/10
+    ##################### T2 DONE #####################
+
+===== running t4 =====
+  exit=0
+    [INFO]   Orphan recovered: 0
+    [INFO]   Aggressive recovered: 0
+    [INFO] Files failed: 0
+    [INFO] Filename mappings: 4
+    [INFO] Recovery complete!
+    [15:06:41] v5 journal verify:
+      OK   ino=13 name=f_part
+      OK   ino=14 name=f_full
+    RESULT: 2/2
+    ##################### T4 DONE #####################
+
+===== regression suite done =====
