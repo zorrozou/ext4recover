@@ -55,6 +55,8 @@ The active source equals `audit_v1` plus any in-flight changes; check `git log` 
 
 ## Real-disk evidence currently in `logs/`
 
+### Phase 0/1/2 (regression gate + dedup)
+
 | Log | What it proves |
 |-----|----------------|
 | `t0a_dedup.log` | T0a regression gate green after dedup integration; original + v5 normal both md5-match on 2 GB file |
@@ -69,6 +71,39 @@ The active source equals `audit_v1` plus any in-flight changes; check `git log` 
 | `tdedup2.log` | aggressive over 500 GB (timed out at 30 min by design) |
 | `tdedup2_v5_summary.log` | filtered key lines from aggressive run: 5 leaf headers found, 3 dumped, 2 skipped |
 | `regression.log` | combined T0a + T2 + T4 regression run output |
+
+### Phase 3 (parallelization, **negative result**)
+
+| Log | What it proves |
+|-----|----------------|
+| `tpar1.log` | Correctness regression: `--parallel` vs serial on 40 GB - `diff -r` IDENTICAL, both md5-match |
+| `tpar2.log` | Throughput on 300 GB: parallel @ 7 workers slower than serial. Disk is IO-bound at ~92 % of raw read ceiling. |
+| `t0a_parallel_optin.log` | Post-Phase-3 regression gate: default (serial) path still recovers 2 GB file with md5 match |
+
+### Phase 4 (file-level reconstruction)
+
+| Log | What it proves |
+|-----|----------------|
+| `tfile1.log` | Natural 1 GB file (5 extents) on /dev/vdb7 — recovered through the existing `recover_orphaned_extent_block` (leaf path) with md5 match. Phase 4 is non-disruptive. |
+| `tfile2.log` | Synthetic depth=1 test: forge a root+leaf pair pointing at a deleted file's real data extent. Aggressive emits `aggressive_tree_1000000` with md5 byte-identical to the original 64 MB file. Phase 4 code path verified to execute. |
+| `t0a_tree_v1.log` | Post-Phase-4 regression gate: T0a still recovers 2 GB with md5 match |
+
+### Phase 5 (journal seq-aware)
+
+| Log | What it proves |
+|-----|----------------|
+| `tjseq1_v2.log` | After patch fix-up - DEBUG line now reads `seq=N`, proving Phase 5 code path runs |
+| `tjseq_ab.log` | A/B/C snapshot comparison: dedup_v1 / tree_v1 / jseq_v1 all recover 5/10 md5-matching files. Phase 5 non-regressive. |
+| `t0a_jseq.log` | Post-Phase-5 regression gate: 2 GB recovery md5 match |
+
+### Audit (post-Phase-5 code walkthrough)
+
+| Log | What it proves |
+|-----|----------------|
+| `t0a_audit_v1.log` | Audit-fix regression gate: 2 GB recovery md5 match |
+| `tfile2_audit.log` | Phase 4 still PASS after B3 byte-order fix - md5 byte-identical |
+| `tjseq_ab_audit.log` | A/B `jseq_v1` vs `audit_v1` on identical disk snapshot - both 5/10. B2 size-gate removal didn't change journal recall. |
+| `taudit_speed.log` | Cold-cache speed comparison: dedup_v1=277s, audit_v1=277s. Cloud disk is IO-bound; B1's syscall reduction is hidden under device read latency. |
 
 ## Source map (improved/)
 
