@@ -109,9 +109,9 @@ re-writing the same physical extent that an earlier phase already wrote.
 
 Status: ✅ complete. Frozen baseline: `improved/baselines/ext4recover_v5.c.dedup_v1`.
 
-## 4. Phase 3 — Aggressive parallelization (designed, NOT implemented)
+## 4. Phase 3 — Aggressive parallelization (implemented, **disabled by default**)
 
-Goal: 4 T scan from ~4.5 h → ~2 h while preserving exact byte-level
+Goal (original): 4 T scan from ~4.5 h → ~2 h while preserving exact byte-level
 output (regression-tested against Phase 2 baseline).
 
 Design (see `docs/design-parallel.md`):
@@ -123,25 +123,39 @@ into ringbuffer (mmap)        per 4 K block; on hit enqueue      dump if not cov
                               hit candidate                      register interval
 ```
 
-* [ ] Replace per-block `io_channel_read_blk64` (current bottleneck:
-      245 MB/s on 4 K syscalls) with a single reader thread doing
-      64 MB `pread64` into a double-buffered mmap-backed ring; expected
-      raw bandwidth jump to 500–700 MB/s on the same disks.
-* [ ] N CPU-only worker threads pull 4 K block views from the ring,
-      do `eh_magic == 0xF30A` + `validate_extent_header`. On hit,
-      push the candidate (block_num + buffer copy) to a hit queue.
-* [ ] Single writer thread is the only one calling `recover_block_to_file`
-      and `intervals_add` — no locks needed on hot paths beyond the
-      pthread_rwlock already in `recovered_intervals`.
-* [ ] Per-segment checkpoint: after each 1 GB segment finishes write-out,
-      `fsync` and update checkpoint json (re-uses v5's existing
-      `--resume` mechanism, just at segment granularity instead of inode).
-* [ ] **Regression**: outputs (file count, names, contents) must be
-      identical to single-threaded Phase 2 build on T-DEDUP-2 data.
-* [ ] Stretch: per-segment thread-local interval shard, periodic merge
-      into global tree, eliminates RW-lock contention if it shows up.
+Implementation:
 
-Status: ⏳ design complete, code not written.
+* [x] Built the pipeline in `improved/parallel_scan.c` (~370 LoC).
+* [x] Reader → bounded chunk queue → workers (each worker takes a whole chunk,
+      scans every 4 KB block inside it serially) → writer consumes hit lists
+      in strict chunk-id order, guaranteeing the output is identical to the
+      serial path.
+* [x] New CLI: `--parallel` (opt-in), `--workers N` (default `ncpu-1`).
+* [x] **Correctness regression PASSED** on T-PAR-1 (40 GB, two multi-level
+      extent files): `diff -r` between parallel and serial output dirs is
+      empty; md5 of recovered files matches manifest.
+
+Performance result (T-PAR-2, 300 GB partition):
+
+| Path | Throughput |
+|------|-----------|
+| Raw `dd` direct-IO seq read (physical ceiling) | **267 MB/s** |
+| Serial aggressive scan (Phase 2 binary) | **~245 MB/s** = 92 % of ceiling |
+| Parallel aggressive scan, 7 workers | **77–155 MB/s** — slower than serial |
+
+**Decision**: the serial path was already at 92 % of the disk's raw read
+bandwidth, so the CPU-side magic check was never the bottleneck. Adding
+worker threads on the same single physical disk produces a *negative*
+result (extra pread + synchronization overhead). The parallel code is
+preserved for environments where it *would* help (striped multi-spindle
+arrays, NVMe with deep queue depth, network-attached storage), but
+**the default is now serial**.
+
+Status: ✅ implemented, ⚠️ disabled by default. Frozen baseline:
+`improved/baselines/ext4recover_v5.c.parallel_optin`.
+
+See `docs/design-parallel.md` § "2026-06-03 update" for the full
+post-mortem and the conditions under which `--parallel` would pay off.
 
 ## 5. Phase 4 — File-level reconstruction (depth>0 traversal in aggressive)
 

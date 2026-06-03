@@ -1,0 +1,9 @@
+nohup: ignoring input
+[07:26:15] lib loaded (v2). WORK=/mnt/work
+##################### T-PAR-2: parallel throughput on 300G #####################
+[07:26:15] mkfs /dev/vdb6 (opts: -b4096)
+[07:26:19] step1: write a 1GB multi-level extent file
+  big: 5 extents
+[07:26:26] step2: rm + sync
+[07:26:26] device size: 300 GB
+[07:26:26] >>> parallel aggressive scan, workers=7

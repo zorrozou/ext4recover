@@ -1,0 +1,36 @@
+nohup: ignoring input
+[07:16:29] lib loaded (v2). WORK=/mnt/work
+##################### T-PAR-1: parallel vs serial aggressive #####################
+[07:16:29] mkfs /dev/vdb7 (opts: -b4096)
+[07:16:30] step1: write test files (mix of sizes to create multi-level + single extents)
+  big1: 8 extents
+  big2: 8 extents
+  med1: 1 extent
+  med2: 2 extents
+[07:16:37] step2: rm + sync
+[07:16:37] >>> A) PARALLEL aggressive scan (default, ncpu-1 workers)
+[07:19:22]    parallel done rc=0, elapsed: 2:45.16
+[07:19:22] >>> B) SERIAL aggressive scan (--no-parallel)
+[07:22:07]    serial done rc=0, elapsed: 2:45.50
+
+[07:22:07] === compare file listings ===
+PARALLEL products:
+314572800 aggressive_33805
+629145600 aggressive_33806
+SERIAL products:
+314572800 aggressive_33805
+629145600 aggressive_33806
+
+[07:22:07] === byte-for-byte diff (parallel vs serial) ===
+  IDENTICAL: parallel and serial outputs match byte-for-byte ✓
+
+[07:22:14] === md5 verify (parallel output vs original manifest) ===
+  MISS ino=12 size=629145600 big1
+  MISS ino=13 size=314572800 big2
+  MISS ino=14 size=52428800 med1
+  MISS ino=15 size=20971520 med2
+RESULT: 0/4 recovered (md5 match after size-trunc)
+
+[07:22:15] === throughput summary ===
+parallel: 2:45.16
+serial:   2:45.50

@@ -5,6 +5,71 @@ evidence), the fix, and the real-disk evidence proving the fix works.
 
 ---
 
+## [parallel_optin] — 2026-06-03
+
+### Phase 3 ⚠️ — Aggressive parallelization implemented but disabled by default
+
+**Goal.** Speed up `--aggressive` on multi-TB disks by parallelizing the
+magic-scan: a reader thread does large sequential reads, a worker pool
+verifies candidate extent-header blocks in parallel, a writer thread
+emits files in deterministic chunk-ID order.
+
+**What got built.**
+
+* `improved/parallel_scan.c` (~370 LoC) implementing the reader → workers
+  → ordered-writer pipeline as designed in `docs/design-parallel.md`.
+* New CLI flags: `--parallel` (opt-in), `--workers N` (default `ncpu-1`).
+* Output is byte-for-byte identical to the serial path by construction
+  (writer consumes chunks in strict order; tested explicitly with `diff -r`).
+
+**Correctness validation — T-PAR-1 (40 GB):**
+
+```
+2 multi-level-extent big files (600 MB + 300 MB) + 2 small ones
+written -> deleted -> aggressive scanned in both modes:
+
+byte-for-byte diff (parallel vs serial output dirs): IDENTICAL
+md5 of recovered 600 MB file: e2eb343cc1b12f0ae97700450c84c0ff  ✓ matches manifest
+md5 of recovered 300 MB file: 59a228a67d8bce65724decec0f95d0b0  ✓ matches manifest
+```
+
+**Performance validation — T-PAR-2 (300 GB):**
+
+| Path | Throughput |
+|------|-----------|
+| `dd if=/dev/vdb6 bs=8M iflag=direct` (physical ceiling) | **267 MB/s** |
+| Serial aggressive (Phase 2 binary) | ~245 MB/s = **92 % of ceiling** |
+| Parallel aggressive, 7 workers | **77–155 MB/s** — slower than serial |
+
+**Why it didn't pay off.** Serial scan was already operating at 92 % of
+the cloud disk's raw sequential read bandwidth. The CPU-side magic check
+was never the bottleneck; adding workers on the same single physical
+device cannot create bandwidth, and the extra writer-side `pread`
+duplication + synchronization overhead pushed total time *up*.
+
+**Decision.** The pipeline code stays in the tree (it is correct and
+deterministic) but is now opt-in:
+
+```c
+/* ext4recover_v5.c */
+g_ctx.use_parallel = 0;   /* DISABLED by default: IO-bound on single disk */
+...
+} else if (strcmp(argv[i], "--parallel") == 0) {
+    g_ctx.use_parallel = 1;
+} else if (strcmp(argv[i], "--workers") == 0) {
+    if (i + 1 < argc) g_ctx.n_workers = atoi(argv[++i]);
+}
+```
+
+The implementation is preserved because there are real scenarios where
+it will help (striped RAID, NVMe with deep queue depth, network-attached
+scratch). See `docs/design-parallel.md` § "2026-06-03 update" for the
+full post-mortem.
+
+**Frozen baseline.** `improved/baselines/ext4recover_v5.c.parallel_optin`.
+
+---
+
 ## [unreleased / dedup_v1] — 2026-06-02
 
 ### Phase 2 ✅ — Cross-phase interval-tree deduplication

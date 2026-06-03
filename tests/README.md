@@ -22,6 +22,8 @@ Do not run on a system disk. Update `ALLOWED_DEVS` in
 | `t6.sh` | bigalloc cluster=64 K. |
 | `tdedup1.sh` | normal+journal combined dedup verify on 600 MB file. |
 | `tdedup2.sh` | aggressive cross-phase dedup verify (timeboxed 30 min). |
+| `tpar1.sh` | **Phase 3** parallel-vs-serial correctness regression on a 40 GB partition. Asserts byte-for-byte identical output between `--parallel` and the default (serial) path. |
+| `tpar2.sh` | **Phase 3** parallel throughput measurement on a 300 GB partition. Demonstrated that parallelization on a single physical disk is a net-negative — see `docs/design-parallel.md` § "2026-06-03 update". |
 | `regression.sh` | T0a + T2 + T4 in sequence — quick sanity bundle. |
 | `audit.sh` | Manual audit helper used while debugging the framework itself. |
 | `test_intervals.c` | C unit test for `recovered_intervals` data structure. |

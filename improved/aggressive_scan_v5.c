@@ -12,6 +12,7 @@
  */
 
 #include "ext4_common_v5.h"
+#include "parallel_scan.h"
 
 /* Track recovered extent blocks to avoid duplicates */
 struct recovered_extent_block {
@@ -24,7 +25,7 @@ static struct recovered_extent_block *recovered_list = NULL;
 /*
  * Check if a block was already recovered
  */
-static int is_block_recovered(blk64_t block)
+int is_block_recovered(blk64_t block)
 {
     struct recovered_extent_block *p = recovered_list;
     
@@ -84,9 +85,9 @@ static int is_block_free(struct recover_context *ctx, blk64_t block)
 /*
  * Try to recover data from an orphaned extent leaf block
  */
-static int recover_orphaned_extent_block(struct recover_context *ctx,
-                                         blk64_t block_num,
-                                         char *buf)
+int recover_orphaned_extent_block(struct recover_context *ctx,
+                                  blk64_t block_num,
+                                  char *buf)
 {
     struct ext3_extent_header *eh = (struct ext3_extent_header *)buf;
     struct ext3_extent *ee;
@@ -281,8 +282,21 @@ int aggressive_scan(struct recover_context *ctx)
             (unsigned long long)end_block,
             (unsigned long long)(end_block * ctx->blocksize / 1024 / 1024));
     
-    /* Scan the device */
-    retval = scan_for_extent_headers(ctx, start_block, end_block);
+    /* Scan the device (parallel by default, fallback to serial) */
+    if (ctx->use_parallel) {
+        int nw = ctx->n_workers;
+        if (nw <= 0) {
+            long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+            nw = (ncpu > 1) ? (int)(ncpu - 1) : 1; /* leave 1 core for reader/writer */
+        }
+        retval = parallel_scan_for_extent_headers(ctx, start_block, end_block, nw);
+        if (retval < 0) {
+            LOG_WARN("Parallel scan setup failed, falling back to serial");
+            retval = scan_for_extent_headers(ctx, start_block, end_block);
+        }
+    } else {
+        retval = scan_for_extent_headers(ctx, start_block, end_block);
+    }
     
     /* Clean up */
     free_recovered_list();

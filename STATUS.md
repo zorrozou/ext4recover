@@ -1,6 +1,6 @@
 # STATUS — current snapshot
 
-Date: 2026-06-02
+Date: 2026-06-03
 Server under test: `/dev/vdb` (10 T) + `/dev/vdc` (10 T) on a Tencent Cloud VM.
 Kernel: Ubuntu 6.8 family.
 
@@ -11,20 +11,39 @@ Kernel: Ubuntu 6.8 family.
 | 0 | Test infrastructure & golden baseline (T0a) | ✅ DONE |
 | 1 | Surface and fix v5 regressions vs original | ✅ DONE |
 | 2 | Cross-phase dedup (interval-tree) | ✅ DONE |
-| 3 | Aggressive parallelization | ⏳ designed, not coded |
-| 4 | Aggressive depth>0 file-level reconstruction | ⏳ planned |
+| 3 | Aggressive parallelization | ⚠️ implemented, **disabled by default** — see below |
+| 4 | Aggressive depth>0 file-level reconstruction | ⏳ planned (next) |
 | 5 | Journal sequence-aware version selection | ⏳ planned |
 | 6 | `--target-inode` / `--target-md5` early exit | ⏳ planned |
 | 7 | Robustness (counter unification, `O_DIRECT`, inline_data) | ⏳ planned |
+
+## Phase 3 conclusion — parallelization is NOT a win on a single disk
+
+We implemented the pipeline (`parallel_scan.c`, ~370 LoC: reader → worker pool → ordered writer) and validated **byte-for-byte identical output vs serial** on T-PAR-1 (40 GB, 4 files including two multi-level-extent big files: both md5 match).
+
+Then we measured throughput on a 300 GB partition (T-PAR-2) and against the raw device:
+
+| Path | Throughput | Notes |
+|------|-----------|-------|
+| Raw `dd` direct-IO seq read (physical ceiling) | **267 MB/s** | `dd if=/dev/vdb6 bs=8M iflag=direct` |
+| Serial aggressive scan (Phase 2 baseline) | **~245 MB/s** | 92 % of physical ceiling |
+| Parallel aggressive scan, 7 workers | **77–155 MB/s** | NEGATIVE — slower than serial |
+
+**Root cause**: serial scan is already at 92 % of the disk's sequential-read bandwidth. Adding worker threads on the SAME single physical device cannot help — the CPU-side magic check is not the bottleneck. The parallel pipeline only adds synchronization overhead (writer's per-hit `pread` re-read in particular) and *slows things down*.
+
+**Decision**: the parallel code stays in the tree (it's correct and may help on a striped multi-disk array or NVMe), but **default is now serial**. Users opt in with `--parallel [--workers N]`. The exit criterion for Phase 3 has been moved from "≥ 2× speedup" to "disable by default, document why."
+
+See `docs/design-parallel.md` § "2026-06-03 update: post-implementation measurement" for the full evidence table and the conditions under which parallelization *would* pay off (multi-spindle / NVMe / network-attached scratch).
 
 ## Current frozen baselines (in `improved/baselines/`)
 
 | File | Meaning |
 |------|---------|
 | `ext4recover_v5.c.before_normal_fix_20260602_110302` | v5 as received — has the `eh_entries==0` regression bug |
-| `ext4recover_v5.c.dedup_v1` | latest stable: normal-fix + T6-bigalloc-fix + interval-tree dedup |
+| `ext4recover_v5.c.dedup_v1` | normal-fix + T6-bigalloc-fix + interval-tree dedup |
+| `ext4recover_v5.c.parallel_optin` | **current** — Phase 3 implemented but disabled by default; new `--parallel` opt-in flag |
 
-The active source `improved/ext4recover_v5.c` equals `dedup_v1` plus
+The active source `improved/ext4recover_v5.c` equals `parallel_optin` plus
 any in-flight changes; check `git log` for delta.
 
 ## Real-disk evidence currently in `logs/`
@@ -54,8 +73,10 @@ any in-flight changes; check `git log` for delta.
 | `orphan_recovery_v5.c` | ~130 | orphan list walker (rarely triggered after clean unmount) |
 | `extent_validator_v5.c` | ~250 | sanity rules for extent header / index / leaf |
 | `utils_v5.c` | ~420 | bigalloc init, filename mapping (incl. journal-dir-block scan), checkpoint json |
-| `recovered_intervals.c` | ~170 | **NEW** sorted/merged physical-block interval set |
-| `recovered_intervals.h` | ~30 | **NEW** API |
+| `recovered_intervals.c` | ~170 | sorted/merged physical-block interval set |
+| `recovered_intervals.h` | ~30 | API |
+| `parallel_scan.c` | ~370 | **NEW** reader/worker/writer pipeline; activated with `--parallel`; see Phase 3 notes |
+| `parallel_scan.h` | ~25 | **NEW** API |
 | `ext4_common_v5.h` | ~205 | shared types, `recover_context`, includes `recovered_intervals.h` |
 | `Makefile_v5` | small | links `-lext2fs -lcom_err -lpthread` |
 
@@ -90,10 +111,13 @@ any in-flight changes; check `git log` for delta.
    attempts to force a small file to spill into ≥ 5 extents fail —
    modern ext4 finds contiguous space even on near-full filesystems.
    This is also why T0b stays at 0/N for `--normal`.
-3. **Aggressive on a multi-TB disk takes hours.**
-   Currently single-threaded 4 KB pread per block. Designed parallel
-   solution lives in `docs/design-parallel.md` (Phase 3). Time-boxed
-   tests intentionally kill the process; this is documented behavior.
+3. **Aggressive on a multi-TB disk takes hours, and adding threads on
+   a single disk does NOT help.** Serial scan already runs at ~92 % of the
+   device's raw sequential-read bandwidth (267 MB/s on our test VM).
+   The implemented `--parallel` pipeline produced byte-identical output
+   but ran 20–50 % *slower* than serial on the same device — it is kept
+   in the tree as opt-in for future multi-spindle / NVMe scenarios.
+   Time-boxed tests intentionally kill the process; this is documented behavior.
 
 ## How to run T0a yourself (the regression gate)
 

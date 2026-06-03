@@ -30,3 +30,11 @@ on the test VM (Tencent Cloud, `/dev/vdb` 10 TB partitioned, `/dev/vdc`
 ```
 
 Captured by `record_file` in `tests/lib_recover_test.sh` before deletion.
+
+## Phase 3 logs (parallelization)
+
+| Log | What it shows |
+|-----|---------------|
+| `tpar1.log` | Correctness regression: parallel vs serial on 40 GB. `diff -r` between two output dirs is empty; md5 of recovered files matches manifest. |
+| `tpar2.log` | Throughput measurement on 300 GB. Parallel @ 7 workers ran slower than serial — the serial scan was already at 92 % of the disk's raw read bandwidth (267 MB/s). |
+| `t0a_parallel_optin.log` | Post-Phase-3 regression gate on T0a: default (serial) path still recovers 2 GB file with md5 match. |

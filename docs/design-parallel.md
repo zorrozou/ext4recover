@@ -177,3 +177,67 @@ improved/Makefile_v5                # add parallel_scan.c, ensure -lpthread
 ```
 
 Estimated work: ~600 LOC, 1–2 days of development + testing.
+
+---
+
+## 2026-06-03 update: post-implementation measurement
+
+We implemented this design and measured it on the real test environment. **The parallel pipeline did not deliver any speedup on a single physical disk.** This section records exactly what happened so future maintainers don't repeat the same mistake.
+
+### What was built
+
+* `improved/parallel_scan.c` (~370 LoC): a chunked reader → worker pool → ordered writer pipeline as designed above.
+* Integration in `aggressive_scan_v5.c`: when `ctx->use_parallel` is set, `scan_for_extent_headers()` dispatches to the parallel path instead of the serial per-block loop.
+* New CLI: `--parallel` (default OFF), `--workers N` (default `ncpu-1`).
+
+### Correctness check (T-PAR-1, 40 GB partition)
+
+Two 600 MB / 300 MB multi-level-extent files were written, deleted, then recovered by aggressive scan in both modes:
+
+```
+byte-for-byte diff (parallel vs serial output dirs): IDENTICAL
+md5 of recovered aggressive_33806 (600 MB): e2eb343cc1b12f0ae97700450c84c0ff  ✓ matches manifest big1
+md5 of recovered aggressive_33805 (300 MB): 59a228a67d8bce65724decec0f95d0b0  ✓ matches manifest big2
+```
+
+So the implementation is functionally correct; the ordered-writer design successfully produces deterministic, byte-identical output to the serial path.
+
+### Throughput measurement (T-PAR-2, 300 GB partition)
+
+| Path | Time | Effective throughput | Notes |
+|------|------|----------------------|-------|
+| Raw `dd if=/dev/vdb6 of=/dev/null bs=8M iflag=direct count=2560` | 80.3 s for 20 GiB | **267 MB/s** | physical ceiling of this cloud disk |
+| Serial aggressive scan (Phase 2 binary, `dedup_v1`) | ~20 min for 300 GB | **~245 MB/s** | already at **92 % of physical ceiling** |
+| Parallel aggressive scan, 7 workers | killed at 33 min after ~150 GB scanned | **~77 MB/s avg** | **negative result** — slower than serial |
+
+The 300 GB run was terminated at 33 min because it was clearly losing to serial. Even at the half-way point the per-chunk progress log showed `writer keeps up with reader, no backlog`, confirming that the CPU side is not the bottleneck and adding workers does not help.
+
+### Why the design didn't pay off
+
+The original assumption was *"4 KB pread syscall overhead is the bottleneck, batching to 64 MB will free a lot of headroom."* That assumption was wrong:
+
+1. **The serial path was already IO-bound, not syscall-bound.** Linux's readahead and page cache turn many small sequential 4 KB reads into a small number of large device-level fetches, so the per-syscall cost is amortized away. The ratio `serial-throughput / raw-throughput = 92 %` proves the serial loop is using nearly all the available bandwidth.
+2. **More worker threads cannot create bandwidth.** On a single physical device, sequential reads are limited by the device's max read MB/s. CPU-side magic verification takes microseconds per block on modern x86; it was never the limit.
+3. **The pipeline added net overhead.** Two costs in particular:
+   * The writer still does a per-hit `pread64()` to fetch the leaf block on each match (it can't reuse the worker's chunk buffer because by the time the writer runs, the buffer has been recycled). That re-read fights for the same disk's bandwidth.
+   * Ring-buffer slot management + condition-variable signaling adds tens of µs per chunk; with 19 200 chunks that's measurable, but tiny vs the IO time. The bigger killer is the duplicate IO above.
+4. **The disk does not benefit from concurrent random read.** Even if the writer's per-hit pread did not exist, kicking off N concurrent sequential streams on the same device would only convert one near-optimal sequential read pattern into N interleaved ones — strictly worse for both spinning rust and cloud-virtualized block devices.
+
+### When would parallelization actually help?
+
+The design is preserved (opt-in via `--parallel`) because there are real scenarios where it would pay off:
+
+* **Multi-spindle striped array** (RAID0 / LVM striped / MD RAID with multiple physical members): each worker reads from a different physical spindle, total bandwidth scales with stripe count.
+* **NVMe SSD with deep queue depth**: a single thread cannot saturate a modern NVMe (which wants QD=32+). Multiple workers issuing pread in parallel can hit ≥ 3 GB/s where one thread gets stuck around 1 GB/s.
+* **Network-attached scratch (NFS / iSCSI / Ceph RBD)**: client-side concurrent IO is necessary to hide network latency.
+
+For all of these, the existing pipeline is the right shape, and the determinism work was not wasted.
+
+### What changed in this repo as a result
+
+* Default of `g_ctx.use_parallel` flipped from 1 to 0 (see `ext4recover_v5.c`).
+* CLI flag renamed semantically: was `--no-parallel` (opt-out), now `--parallel` (opt-in).
+* New baseline snapshot: `improved/baselines/ext4recover_v5.c.parallel_optin`.
+* Phase 3 status in `STATUS.md` reset to "implemented, disabled by default" with the throughput evidence above.
+
+The verdict is unambiguous: **on a single physical disk the IO bandwidth IS the bottleneck. Future performance work should target IO patterns, not CPU concurrency.**

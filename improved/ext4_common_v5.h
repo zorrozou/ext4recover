@@ -93,6 +93,10 @@ struct recover_context {
     unsigned long dedup_skipped;          /* extents skipped due to dedup */
     unsigned long dedup_skipped_blocks;   /* blocks skipped due to dedup */
     
+    /* Aggressive parallel scan options */
+    int use_parallel;          /* 1 = opt-in via --parallel; default OFF (IO-bound) */
+    int n_workers;             /* worker thread count (0 = auto) */
+    
     /* Checkpoint/resume */
     int resume_mode;
     blk64_t checkpoint_journal_offset;
