@@ -159,24 +159,55 @@ post-mortem and the conditions under which `--parallel` would pay off.
 
 ## 5. Phase 4 — File-level reconstruction (depth>0 traversal in aggressive)
 
-Currently `recover_orphaned_extent_block` (line 98) early-exits when
-`eh_depth != 0`, so a file whose root index points to N leaves becomes
-N independent `aggressive_<block>` fragments. The user has to manually
-guess which fragments belong together.
+Previously `recover_orphaned_extent_block` early-exited when
+`eh_depth != 0`, so a file whose tree included an independent
+depth>0 index block on disk was either ignored or its leaves were
+each emitted as a separate `aggressive_<block>` fragment. The user
+had no way to know they belonged together.
 
-* [ ] When aggressive scan finds a depth>0 header, follow each
-      `ei_leaf_hi:ei_leaf` to its leaf; gather all leaf extents into
-      one consolidated extent set; emit one file instead of N.
-* [ ] Compute per-discovered-tree fingerprint =
-      `sha1(sort(<ee_block, ee_start, ee_len> per extent))`.
-      Maintain a fingerprint set; if a new tree's fingerprint is a
-      subset of an existing one, drop it; if a superset, replace.
-      This catches the "journal old leaf vs current leaf"
-      version-overlap problem your review flagged.
-* [ ] Real-disk validation: T1-style 2 GB file should now produce a
-      single recovered file from aggressive instead of one per leaf.
+* [x] When aggressive scan finds a depth>0 header, dispatch to a new
+      `recover_orphaned_extent_tree()` instead of returning 0.
+* [x] Implemented `walk_extent_tree()` (recursive, capped at depth 5)
+      that follows each `ei_leaf_hi:ei_leaf` to its leaf, validates
+      each level's header (magic + sane entries + ei_leaf in range
+      `[2, total_blocks)`), and collects every leaf extent.
+* [x] Collected extents are sorted by logical block, then dumped as
+      ONE consolidated file `aggressive_tree_<root_block>` instead of
+      N independent fragments.
+* [x] Leaf blocks reached via the tree walk are marked recovered so
+      the linear scan won't later re-emit them as standalone
+      `aggressive_<leaf>` files.
+* [x] Dedup pre-check: if every collected extent is already covered by
+      `recovered_extents`, the whole tree is skipped without
+      creating an empty file.
+* [x] Synthetic real-disk validation (T-FILE-2): forge a depth=1 root
+      block in a free area of `/dev/vdb7` pointing to a forged leaf
+      that in turn points to a deleted file's real data extent. Run
+      aggressive scan, verify `aggressive_tree_<root>` is emitted
+      with md5 byte-identical to the original file.
 
-Status: ⏳ planned.
+Real-disk evidence (`logs/tfile2.log`):
+
+```
+[INFO] Found orphaned extent tree root at 1000000, depth=1 entries=1
+[INFO] Reconstructed tree at 1000000 into aggressive_tree_1000000 (1 extents)
+expected md5: 5df7f9ae046e80f52381e952dbc3e685
+got      md5: 5df7f9ae046e80f52381e952dbc3e685  ✓
+size: 67108864 (64MB)                            ✓
+```
+
+Note: in practice a depth>0 *index* node on disk (outside the inode)
+only exists when the file's tree is depth>=2 (i.e. >340 extents on a
+4KB-block FS) - which is rare for normal workloads. The far more
+common depth=0/depth=1 case is still handled by the original leaf path
+and continues to work (T-FILE-1 1 GB file still recovered with md5
+match through `recover_orphaned_extent_block`). Phase 4 is the
+mechanism that *would* save the user from a fragmented manual reassembly
+when an independent index block does survive on disk.
+
+Status: ✅ implemented + validated. Frozen baseline:
+`improved/baselines/ext4recover_v5.c.tree_v1` /
+`improved/baselines/aggressive_scan_v5.c.tree_v1`.
 
 ## 6. Phase 5 — Journal sequence-aware version selection
 

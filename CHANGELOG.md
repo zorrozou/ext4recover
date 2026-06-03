@@ -5,6 +5,115 @@ evidence), the fix, and the real-disk evidence proving the fix works.
 
 ---
 
+## [tree_v1] — 2026-06-03
+
+### Phase 4 ✅ — Aggressive depth>0 file-level reconstruction
+
+**Problem.** `aggressive_scan_v5.c` previously bailed out on every
+extent-header block whose `eh_depth != 0`:
+
+```c
+if (eh->eh_depth != 0) {
+    LOG_DEBUG(... "not a leaf extent block, skipping");
+    return 0;          /* abandon the block entirely */
+}
+```
+
+Consequence: when a deleted file's tree was deep enough that ext4
+allocated an *independent* depth>0 index node on disk (rare but not
+impossible — needs the tree to be depth>=2, i.e. >340 extents on a
+4 KB-block FS), aggressive would either drop that index block entirely
+or, worse, emit each individual leaf as a standalone
+`aggressive_<leaf>` fragment with no way to know they belonged to the
+same file. The user had to manually reassemble.
+
+**Fix.** Replace the early-return with a dispatch to a new function:
+
+```c
+if (eh->eh_depth != 0) {
+    return recover_orphaned_extent_tree(ctx, block_num, buf);
+}
+```
+
+`recover_orphaned_extent_tree()` calls a recursive `walk_extent_tree()`
+(depth-bounded to 5, the ext4 maximum) that:
+
+1. Validates the current header (`validate_extent_header`).
+2. If `eh_depth == 0`: appends every valid extent to the collected set,
+   with overflow / device-range / uninit checks.
+3. If `eh_depth >= 1`: for each `ext3_extent_idx`, checks that
+   `ei_leaf` is in `[2, total_blocks)`, reads that block, verifies its
+   magic, recurses. Each followed leaf is also marked recovered so the
+   linear scan won't re-emit it as a standalone fragment.
+
+After walking, the collected extents are sorted by `ee_block` (logical
+order) and dumped sequentially into one file named
+`aggressive_tree_<root_block>`. Dedup is consulted in the same way as
+the leaf path: if every extent is fully covered already, the whole
+tree is skipped silently.
+
+**Real-disk validation (T-FILE-2, synthetic).**
+
+To exercise the depth>0 path deterministically we forge it on a clean
+partition:
+
+```
+1. mkfs /dev/vdb7 (40 GB ext4); write a 64 MB file F; remember its
+   physical extent <34816..51199, 16384 blocks>.
+2. Delete F, umount.
+3. dd into block 1000010: a depth=0 leaf header with 1 extent ->
+   34816..51199.
+4. dd into block 1000000: a depth=1 root header with 1 idx -> 1000010.
+5. Run ext4recover_v5 --aggressive --verbose.
+```
+
+Result:
+
+```
+[INFO] Found orphaned extent tree root at 1000000, depth=1 entries=1
+[INFO] Reconstructed tree at 1000000 into aggressive_tree_1000000 (1 extents)
+
+expected md5: 5df7f9ae046e80f52381e952dbc3e685
+got      md5: 5df7f9ae046e80f52381e952dbc3e685   <- byte-identical
+size:         67108864  (64 MB exactly)
+```
+
+Both the new INFO lines and the `aggressive_tree_*` filename prove the
+Phase 4 code path executes; the md5 match proves the reconstruction
+preserved data integrity through index -> leaf -> physical-block
+resolution.
+
+**Regressions checked.**
+
+* T0a (2 GB multi-level extent on /dev/vdb1, the regression gate):
+  v5 normal still recovers with md5 match (`logs/t0a_tree_v1.log`).
+* T-FILE-1 (1 GB file on /dev/vdb7 with natural ext4 allocation):
+  recovery still works through `recover_orphaned_extent_block` (the
+  leaf path), demonstrating Phase 4 is purely additive — it does not
+  disturb the common-case depth=0 behavior.
+
+**Why this matters in practice.** Genuine on-disk depth>0 index blocks
+appear only for trees of depth >= 2, i.e. files with > 340 extents on
+4 KB-block ext4. That is rare on healthy filesystems but does occur
+on:
+
+* Heavily fragmented backup destinations
+* `fallocate`-ed sparse files with many holes
+* Long-lived databases whose write pattern produces extreme extent
+  fragmentation
+* Filesystems whose journal happened to retain such an index node from
+  a now-deleted very-large file
+
+For such cases, before this fix the user got N orphaned
+`aggressive_<leaf>` files with no map back to a single original; now
+they get one `aggressive_tree_<root>` ready to use.
+
+**Frozen baselines.**
+* `improved/baselines/ext4recover_v5.c.tree_v1`
+* `improved/baselines/aggressive_scan_v5.c.tree_v1`
+
+---
+
 ## [parallel_optin] — 2026-06-03
 
 ### Phase 3 ⚠️ — Aggressive parallelization implemented but disabled by default

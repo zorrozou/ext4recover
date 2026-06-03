@@ -1,0 +1,53 @@
+nohup: ignoring input
+[08:50:40] lib loaded (v2). WORK=/mnt/work
+[08:50:40] mkfs /dev/vdb7 (opts: )
+=== priming fragmentation noise ===
+=== writing target big file (1GB in 4 chunks with sync) ===
+=== filefrag (before delete) ===
+Filesystem type is: ef53
+File size of /mnt/target/big is 1073741824 (262144 blocks of 4096 bytes)
+ ext:     logical_offset:        physical_offset: length:   expected: flags:
+   0:        0..   53247:      45056..     98303:  53248:            
+   1:    53248..  116735:     100352..    163839:  63488:      98304:
+   2:   116736..  180223:     165888..    229375:  63488:     163840:
+   3:   180224..  243711:     231424..    294911:  63488:     229376:
+   4:   243712..  262143:     296960..    315391:  18432:     294912: last,eof
+/mnt/target/big: 5 extents found
+extent count = 5
+=== deleting + umount ===
+=== aggressive scan ===
+[INFO] Scanned 10350000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10360000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10370000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10380000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10390000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10400000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10410000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10420000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10430000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10440000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10450000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10460000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10470000 blocks, found 2 orphaned extent blocks
+[INFO] Scanned 10480000 blocks, found 2 orphaned extent blocks
+[INFO] Scan complete: found 2 orphaned extent blocks in range
+[INFO] Aggressive scan complete: recovered 2 extent blocks
+[INFO] === Recovery Statistics ===
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 0
+[INFO]   Orphan recovered: 0
+[INFO]   Aggressive recovered: 2
+[INFO] Files failed: 0
+[INFO] Filename mappings: 1
+[INFO] Dedup intervals: 5 distinct extents, 272384 blocks total; 8 writes skipped (139264 blocks)
+[INFO] Recovery complete!
+=== produced files ===
+total 1105932
+drwxr-xr-x  2 root   root         4096 Jun  3 08:53 .
+drwxrwxr-x 41 ubuntu ubuntu       4096 Jun  3 08:50 ..
+-rw-r-----  1 root   root   1073741824 Jun  3 08:50 aggressive_33798
+-rw-r-----  1 root   root     58720256 Jun  3 08:50 aggressive_33806
+  candidate: /mnt/work/recover_out/tfile1_aggr/aggressive_33798 size=1073741824 md5=16e71b8cad76c3ed0025c3a23061d9dd
+  ==> MATCH on /mnt/work/recover_out/tfile1_aggr/aggressive_33798
+  candidate: /mnt/work/recover_out/tfile1_aggr/aggressive_33806 size=58720256 md5=7e1de11e8448d3978e13a4bf14c9bf28
+RESULT: T-FILE-1 PASS (1 complete file recovered)
