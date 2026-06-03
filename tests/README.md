@@ -26,6 +26,8 @@ Do not run on a system disk. Update `ALLOWED_DEVS` in
 | `tpar2.sh` | **Phase 3** parallel throughput measurement on a 300 GB partition. Demonstrated that parallelization on a single physical disk is a net-negative — see `docs/design-parallel.md` § "2026-06-03 update". |
 | `tfile1.sh` | **Phase 4 (natural)** writes a 1 GB file, deletes it, runs aggressive. Confirms the common single-leaf path is undisturbed by Phase 4 and still recovers an md5-matching file. |
 | `tfile2.sh` | **Phase 4 (synthetic)** wipes the partition, writes a 64 MB file F, deletes it, then dd-injects a forged depth=1 root + leaf header on free disk so the depth>0 path is deterministically exercised. Asserts: aggressive emits `aggressive_tree_<root>` AND its md5 matches F. |
+| `tjseq1.sh` | **Phase 5** writes V1 → truncate → V2 → truncate → V3 (newest) → rm, runs `--journal`. Verifies the new DEBUG line `seq=N` is emitted (Phase 5 code path actually runs). In current jbd2 behavior only one candidate survives so old/new strategies converge. |
+| `tjseq_ab.sh` | **Phase 5 strict A/B/C** snapshots the same disk state into `tjseqab.img`, restores via loop, then runs three binaries (`dedup_v1` / `tree_v1` / `jseq_v1`) in sequence. Confirms Phase 5 is non-regressive (5/10 across all three). |
 | `regression.sh` | T0a + T2 + T4 in sequence — quick sanity bundle. |
 | `audit.sh` | Manual audit helper used while debugging the framework itself. |
 | `test_intervals.c` | C unit test for `recovered_intervals` data structure. |

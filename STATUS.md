@@ -11,10 +11,10 @@ Kernel: Ubuntu 6.8 family.
 | 0 | Test infrastructure & golden baseline (T0a) | ✅ DONE |
 | 1 | Surface and fix v5 regressions vs original | ✅ DONE |
 | 2 | Cross-phase dedup (interval-tree) | ✅ DONE |
-| 3 | Aggressive parallelization | ⚠️ implemented, **disabled by default** — see below |
+| 3 | Aggressive parallelization | ⚠️ implemented, **disabled by default** |
 | 4 | Aggressive depth>0 file-level reconstruction | ✅ DONE |
-| 5 | Journal sequence-aware version selection | ⏳ planned (next) |
-| 6 | `--target-inode` / `--target-md5` early exit | ⏳ planned |
+| 5 | Journal sequence-aware version selection | ✅ DONE |
+| 6 | `--target-inode` / `--target-md5` early exit | ⏳ planned (next) |
 | 7 | Robustness (counter unification, `O_DIRECT`, inline_data) | ⏳ planned |
 
 ## Phase 3 conclusion — parallelization is NOT a win on a single disk
@@ -42,11 +42,12 @@ See `docs/design-parallel.md` § "2026-06-03 update: post-implementation measure
 | `ext4recover_v5.c.before_normal_fix_20260602_110302` | v5 as received — has the `eh_entries==0` regression bug |
 | `ext4recover_v5.c.dedup_v1` | normal-fix + T6-bigalloc-fix + interval-tree dedup |
 | `ext4recover_v5.c.parallel_optin` | Phase 3 parallelization, disabled by default |
-| `ext4recover_v5.c.tree_v1` | **current** — adds Phase 4 file-level reconstruction (`recover_orphaned_extent_tree` + `walk_extent_tree` in `aggressive_scan_v5.c`) |
-| `aggressive_scan_v5.c.tree_v1` | aggressive scanner with Phase 4 dispatch to tree-walker on depth>0 headers |
+| `ext4recover_v5.c.tree_v1` | Phase 4 file-level reconstruction (`recover_orphaned_extent_tree`) |
+| `aggressive_scan_v5.c.tree_v1` | aggressive scanner with Phase 4 dispatch |
+| `ext4recover_v5.c.jseq_v1` | **current** — adds Phase 5 (no change to main, only journal module) |
+| `journal_recovery_v5.c.jseq_v1` | **current** — jbd2 transaction-seq aware version selection (`should_skip_for_seq` / `mark_recovered_with_seq`) |
 
-The active source `improved/ext4recover_v5.c` equals `tree_v1` plus
-any in-flight changes; check `git log` for delta.
+The active source equals `jseq_v1` plus any in-flight changes; check `git log` for delta.
 
 ## Real-disk evidence currently in `logs/`
 
@@ -70,7 +71,7 @@ any in-flight changes; check `git log` for delta.
 | File | Lines | Role |
 |------|-------|------|
 | `ext4recover_v5.c` | ~620 | main, mode dispatch, normal-mode extent walker (`recover_from_extent_tree`, `dump_leaf_extent`, `extent_tree_travel`), `recover_block_to_file` writer with **dedup hooks** |
-| `journal_recovery_v5.c` | ~870 | jbd2 scanner, per-inode recovery, **dedup pre-check on depth-0 leaf** |
+| `journal_recovery_v5.c` | ~900 | jbd2 scanner, per-inode recovery, **dedup pre-check on depth-0 leaf**, **Phase 5: seq-aware version selection (`should_skip_for_seq` / `mark_recovered_with_seq`)** |
 | `aggressive_scan_v5.c` | ~610 | full-disk magic scan, leaf-level dedup pre-check, **Phase 4: `walk_extent_tree` + `recover_orphaned_extent_tree` for depth>0 file-level reconstruction** |
 | `orphan_recovery_v5.c` | ~130 | orphan list walker (rarely triggered after clean unmount) |
 | `extent_validator_v5.c` | ~250 | sanity rules for extent header / index / leaf |

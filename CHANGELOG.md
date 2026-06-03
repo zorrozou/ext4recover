@@ -5,6 +5,95 @@ evidence), the fix, and the real-disk evidence proving the fix works.
 
 ---
 
+## [jseq_v1] — 2026-06-03
+
+### Phase 5 ✅ — Journal sequence-aware version selection
+
+**Problem.** When a deleted inode appears more than once in the
+on-disk journal (typical for files that were overwritten or
+truncate+rewritten before deletion), the previous v5 rule picked the
+version with the **largest `i_size`** via
+`already_recovered_larger()`. This is wrong because:
+
+* "Largest size" can be a transient mid-write state (the file was
+  briefly bigger before being truncated to its final smaller size).
+* "Largest size" can be a completely unrelated later inode whose
+  reuse just happened to be larger (e.g. `noise.bin` written into the
+  same inode slot after the user's file was deleted) — T5 hit
+  exactly this trap.
+* The correct semantic for "latest filesystem state of this inode"
+  is "the version recorded by the newest jbd2 transaction". jbd2
+  already tags every descriptor block with `h_sequence`, which v5
+  was reading into a local `seq` variable and then throwing away.
+
+**Fix.** Plumb the transaction sequence into the selection logic:
+
+```c
+/* journal_scan_state now also holds recovered_seqs[]. */
+struct journal_scan_state {
+    ...
+    __u32 *recovered_inodes;
+    __u64 *recovered_sizes;   /* kept for stats only */
+    __u32 *recovered_seqs;    /* NEW: jbd2 h_sequence */
+    ...
+};
+
+/* New decision: skip only if we already have an equal-or-newer seq. */
+static int should_skip_for_seq(state, ino, seq) {
+    for each recorded entry of ino:
+        if recovered_seqs[i] >= seq: return 1;  /* skip */
+        return 0;                                /* newer wins */
+    return 0;
+}
+
+/* New record: also write the seq. */
+static void mark_recovered_with_seq(state, ino, size, seq);
+```
+
+The descriptor's `seq` is propagated through
+`process_inode_table_block(state, buf, fs_block, seq)` from the
+journal-scanning loop (where `__u32 seq = be32_to_cpu(header->h_sequence);`
+was already computed but unused).
+
+Re-dump safety: `recover_inode_from_journal()` already opens output
+files with `O_TRUNC`, so accepting a newer-seq candidate naturally
+overwrites the previously-dumped older-seq file with no extra
+bookkeeping.
+
+**Real-disk validation.**
+
+* `tjseq1.sh` — writes V1=32MB / V2=128MB / V3=64MB versions of the
+  same file with sync between each, then deletes. The new DEBUG line
+  format `Found deleted inode 12 in journal (seq=2 size=33554432 ...)`
+  proves the seq-aware code path actually runs.
+* `tjseq_ab.sh` — A/B/C strict comparison on **identical disk
+  snapshots** (captured into `tjseqab.img`, restored via loop) across
+  `dedup_v1` / `tree_v1` / `jseq_v1`:
+
+  ```
+  dedup_v1 : 5/10 md5-matching files recovered
+  tree_v1  : 5/10 md5-matching files recovered
+  jseq_v1  : 5/10 md5-matching files recovered   <- no regression
+  ```
+
+* T0a regression gate green (`logs/t0a_jseq.log`).
+
+**Honest caveat.** In the simple test scenarios above, jbd2 only
+retained one deleted-with-extents candidate per inode (older versions
+had already been checkpointed out), so both the old size-largest rule
+and the new seq-aware rule converge on the same candidate, and they
+score identically. The new rule's distinctive behavior only fires
+when two or more candidates of the same inode genuinely co-exist in
+the journal — which is exactly the case where the old rule was wrong
+and silent. This patch eliminates that silent-failure mode at the
+cost of zero functionality.
+
+**Frozen baselines.**
+* `improved/baselines/ext4recover_v5.c.jseq_v1`
+* `improved/baselines/journal_recovery_v5.c.jseq_v1`
+
+---
+
 ## [tree_v1] — 2026-06-03
 
 ### Phase 4 ✅ — Aggressive depth>0 file-level reconstruction

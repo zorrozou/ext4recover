@@ -1,0 +1,30 @@
+nohup: ignoring input
+[09:39:18] lib loaded (v2). WORK=/mnt/work
+=== wiping /dev/vdb7 ===
+[09:39:27] mkfs /dev/vdb7 (opts: )
+=== writing V1 (32MB of 0xAA) ===
+V1: size=33554432 md5=aba259a398b053c988e72f47e45bcff1
+=== writing V2 (128MB of 0xBB) ===
+V2: size=134217728 md5=1d85466eb26cd6293aa35ee75f0392e4
+=== writing V3 (64MB of 0xCC, NEWEST) ===
+V3 (expected): ino=12 size=67108864 md5=c2c90d0cf65283db143bb5b3a3204cc4
+=== deleting + umount ===
+=== v5 --journal ===
+[DEBUG] Found deleted inode 12 in journal (seq=2 size=33554432 entries=1 depth=0)
+[INFO] Journal recovered inode 12: 8192 blocks (33554432 bytes) -> /mnt/work/recover_out/tjseq1_journal/target
+[INFO] Journal scan complete. Recovered 1 files from journal.
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 1
+[INFO] Dedup intervals: 1 distinct extents, 8192 blocks total; 0 writes skipped (0 blocks)
+=== produced files ===
+total 32776
+drwxr-xr-x  2 root   root       4096 Jun  3 09:39 .
+drwxrwxr-x 43 ubuntu ubuntu     4096 Jun  3 09:39 ..
+-rw-r-----  1 root   root   33554432 Jun  3 09:39 target
+  candidate: /mnt/work/recover_out/tjseq1_journal/target        size=33554432     md5=9924535ae4737e2e8fe98dabcf45b5c5
+  candidate: /mnt/work/recover_out/tjseq1_journal/target        size=33554432     md5=9924535ae4737e2e8fe98dabcf45b5c5
+
+=== verdict ===
+expected V3: size=67108864 md5=c2c90d0cf65283db143bb5b3a3204cc4
+got        : size=33554432 md5=9924535ae4737e2e8fe98dabcf45b5c5  (/mnt/work/recover_out/tjseq1_journal/target)
+RESULT: T-JSEQ-1 INCONCLUSIVE (got something not matching any version)

@@ -1,0 +1,49 @@
+nohup: ignoring input
+[09:54:57] lib loaded (v2). WORK=/mnt/work
+[09:55:06] mkfs /dev/vdb7 (opts: )
+=== snapshotting /dev/vdb7 to /mnt/work/tjseqab.img (40G) ===
+snapshot size: 42949672960
+
+================== RUN binary=dedup_v1 ==================
+loop=/dev/loop0
+[INFO] Journal recovered inode 12: 1 blocks (4096 bytes) -> /mnt/work/recover_out/tjseqab_dedup_v1/f4k
+[INFO] Journal recovered inode 13: 4 blocks (16384 bytes) -> /mnt/work/recover_out/tjseqab_dedup_v1/f16k
+[INFO] Journal recovered inode 14: 16 blocks (65536 bytes) -> /mnt/work/recover_out/tjseqab_dedup_v1/f64k
+[INFO] Journal recovered inode 15: 25 blocks (102400 bytes) -> /mnt/work/recover_out/tjseqab_dedup_v1/f100k
+[INFO] Journal recovered inode 16: 50 blocks (204800 bytes) -> /mnt/work/recover_out/tjseqab_dedup_v1/f200k
+[INFO] Journal scan complete. Recovered 5 files from journal.
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 5
+[INFO] Dedup intervals: 2 distinct extents, 96 blocks total; 0 writes skipped (0 blocks)
+files in /mnt/work/recover_out/tjseqab_dedup_v1: 5
+  dedup_v1: md5-matching files = 5 / 10
+
+================== RUN binary=tree_v1 ==================
+loop=/dev/loop0
+[INFO] Journal recovered inode 12: 1 blocks (4096 bytes) -> /mnt/work/recover_out/tjseqab_tree_v1/f4k
+[INFO] Journal recovered inode 13: 4 blocks (16384 bytes) -> /mnt/work/recover_out/tjseqab_tree_v1/f16k
+[INFO] Journal recovered inode 14: 16 blocks (65536 bytes) -> /mnt/work/recover_out/tjseqab_tree_v1/f64k
+[INFO] Journal recovered inode 15: 25 blocks (102400 bytes) -> /mnt/work/recover_out/tjseqab_tree_v1/f100k
+[INFO] Journal recovered inode 16: 50 blocks (204800 bytes) -> /mnt/work/recover_out/tjseqab_tree_v1/f200k
+[INFO] Journal scan complete. Recovered 5 files from journal.
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 5
+[INFO] Dedup intervals: 2 distinct extents, 96 blocks total; 0 writes skipped (0 blocks)
+files in /mnt/work/recover_out/tjseqab_tree_v1: 5
+  tree_v1: md5-matching files = 5 / 10
+
+================== RUN binary=jseq_v1 ==================
+loop=/dev/loop0
+[INFO] Journal recovered inode 12: 1 blocks (4096 bytes) -> /mnt/work/recover_out/tjseqab_jseq_v1/f4k
+[INFO] Journal recovered inode 13: 4 blocks (16384 bytes) -> /mnt/work/recover_out/tjseqab_jseq_v1/f16k
+[INFO] Journal recovered inode 14: 16 blocks (65536 bytes) -> /mnt/work/recover_out/tjseqab_jseq_v1/f64k
+[INFO] Journal recovered inode 15: 25 blocks (102400 bytes) -> /mnt/work/recover_out/tjseqab_jseq_v1/f100k
+[INFO] Journal recovered inode 16: 50 blocks (204800 bytes) -> /mnt/work/recover_out/tjseqab_jseq_v1/f200k
+[INFO] Journal scan complete. Recovered 5 files from journal.
+[INFO] Total files recovered: 0
+[INFO]   Journal recovered: 5
+[INFO] Dedup intervals: 2 distinct extents, 96 blocks total; 0 writes skipped (0 blocks)
+files in /mnt/work/recover_out/tjseqab_jseq_v1: 5
+  jseq_v1: md5-matching files = 5 / 10
+
+=== A/B/C summary above ===

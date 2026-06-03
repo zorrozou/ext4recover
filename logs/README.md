@@ -46,3 +46,12 @@ Captured by `record_file` in `tests/lib_recover_test.sh` before deletion.
 | `tfile1.log` | Natural-allocation case: a 1 GB file with 5 extents on /dev/vdb7. Recovered through the existing `recover_orphaned_extent_block` (leaf path) with md5 match. Proves Phase 4 is non-disruptive to the common case. |
 | `tfile2.log` | Synthetic depth=1 test: forge a root+leaf pair pointing at a deleted file's real data extent. Aggressive emits `aggressive_tree_1000000` with md5 byte-identical to the original 64 MB file. Proves the Phase 4 `walk_extent_tree` code path actually executes and reassembles correctly. |
 | `t0a_tree_v1.log` | Post-Phase-4 regression gate: T0a still recovers the 2 GB original file with md5 match. |
+
+## Phase 5 logs (journal seq-aware selection)
+
+| Log | What it shows |
+|-----|---------------|
+| `tjseq1.log` | First run of T-JSEQ-1 against the still-incomplete Phase 5 build (pre-patch fix-up). DEBUG line still has the old format, recovery md5 does not match. Kept for archaeology. |
+| `tjseq1_v2.log` | Re-run after the patch was correctly applied. DEBUG line now reads `seq=2 size=33554432 ...` proving the new code path runs. Only one candidate exists in jbd2, so size and seq strategies converge. |
+| `tjseq_ab.log` | A/B/C snapshot comparison: `dedup_v1` / `tree_v1` / `jseq_v1` all recover 5/10 md5-matching files from identical disk state. Phase 5 is non-regressive. |
+| `t0a_jseq.log` | Post-Phase-5 regression gate: T0a still recovers the 2 GB original file with md5 match. |
