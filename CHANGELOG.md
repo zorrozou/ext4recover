@@ -5,6 +5,107 @@ evidence), the fix, and the real-disk evidence proving the fix works.
 
 ---
 
+## [audit_v1] — 2026-06-03
+
+### Audit ✅ — Five code-walkthrough fixes
+
+A full read-through of all 3792 LoC after Phase 5 surfaced five
+defects that were not caught by any existing test. None of them
+caused a current real-disk test failure, but each is a latent
+correctness or maintainability liability worth fixing now while the
+codebase is fresh in our heads.
+
+#### B1 — `recover_block_to_file` chunked IO
+
+**Problem.** Inner loop did `read(devfd, buf, blocksize)` then
+`write(inofd, buf, blocksize)` for each 4 KB block in an extent.
+A 32768-block (128 MB) extent triggered ~65 K syscalls; a 524288-block
+(2 GB) extent triggered ~1 M syscalls.
+
+**Fix.** Replaced with a 1 MB chunked `pread()` + `pwrite()` loop.
+Removes the implicit lseek state, makes the function thread-safe by
+construction, and reduces syscall count ~256×.
+
+**Speed result.** Did NOT bring the expected speed-up on the cloud
+test disk — both old and new versions converge on ~277 s for a
+cold-cache 2 GB recovery. Cause: vdb1's raw read bandwidth is
+~7.5 MB/s × 2048 MB ≈ 273 s, so the syscall overhead the old code
+spent was hidden under IO wait time anyway. The patch still stands
+because it produces cleaner code and would benefit a fast disk
+(NVMe / striped array) where syscall cost matters.
+
+#### B2 — Phase 5 incomplete: `recover_inode_from_journal` size gate
+
+**Problem.** `journal_recovery_v5.c` had two `do_replace` blocks
+(one in the depth=0 path, one in depth>0) that compared the new
+tmpfile's size against the existing-on-disk file's size and only
+renamed the new file in if it was *bigger*. This was Phase 5's
+predecessor logic and survived the Phase 5 patch — meaning Phase 5
+could correctly decide "this newer seq beats the recorded version"
+in `should_skip_for_seq`, write the data into a tmpname, and then
+silently get vetoed by the size gate at rename time.
+
+The exact failure mode: a `truncate(file, 0); write(...); rm` in
+the user's workflow produces a newer-seq, smaller-size journal
+record. Phase 5 picks it; the size gate discards it; the recovered
+file is the older-seq larger version. The user sees stale data with
+no indication.
+
+**Fix.** Removed both `do_replace` size-comparison blocks. Trust
+`should_skip_for_seq` upstream — it already decided this candidate
+should win. `O_TRUNC` re-open + `rename()` is now unconditional for
+any candidate that reaches this code.
+
+#### B3 — `eh_depth` byte-order safety
+
+**Problem.** `extent_validator_v5.c:49`:
+```c
+if (eh->eh_depth > 5)
+    return 0;
+```
+`eh_depth` is a `__le16` field. The comparison is against a CPU-native
+constant. On little-endian (x86 / ARM-LE) the raw value happens to
+match its little-endian encoding for small numbers, so this works.
+On big-endian (POWER/MIPS-BE) `eh_depth = 1` reads as 0x0100 = 256,
+permitting any depth. The opposite-direction skew can also reject
+valid depths.
+
+**Fix.** Wrap with `ext2fs_le16_to_cpu()`. 1-line.
+
+#### B4 — O(N_groups) linear scan in journal hot path
+
+**Problem.** `calc_inode_from_block()` iterated *every* block group
+(up to thousands on a multi-TB FS) on every call, just to find which
+group the given fs_block belonged to. Called once per inode in every
+journal inode-table block — easily millions of calls on a real run.
+
+**Fix.** Compute the group index in O(1) via
+`g = fs_block / s_blocks_per_group`, then verify membership in that
+group's inode table range.
+
+#### B5 — Help text out of date
+
+`usage()` still printed `--no-parallel` after Phase 3 flipped the
+default. Changed to `--parallel`. 1-line.
+
+#### Validation
+
+| Test | Result |
+|------|--------|
+| T0a regression gate (2 GB original + v5 normal) | ✅ both md5 match |
+| T-FILE-2 (Phase 4 synthetic depth=1) | ✅ aggressive_tree md5 match |
+| T-JSEQ-AB (jseq_v1 vs audit_v1, identical snapshot) | ✅ both 5/10, no regression |
+| T-AUDIT-SPEED (cold cache, 2 GB --normal) | dedup_v1: 277s, audit_v1: 277s — equal (IO-bound) |
+
+**Frozen baselines.**
+* `improved/baselines/ext4recover_v5.c.audit_v1`
+* `improved/baselines/journal_recovery_v5.c.audit_v1`
+* `improved/baselines/extent_validator_v5.c.audit_v1`
+
+This is the last code change planned for this project.
+
+---
+
 ## [jseq_v1] — 2026-06-03
 
 ### Phase 5 ✅ — Journal sequence-aware version selection

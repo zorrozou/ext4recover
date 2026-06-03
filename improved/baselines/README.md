@@ -10,10 +10,13 @@ diff / bisect / revert without git history.
 | `ext4recover_v5.c.parallel_optin` | 2026-06-03 08:07 | Adds Phase 3 parallelization (`improved/parallel_scan.c`) but disabled by default — IO-bound on single disk. Adds `--parallel` / `--workers` CLI flags. |
 | `ext4recover_v5.c.tree_v1` | 2026-06-03 09:21 | Adds Phase 4 file-level reconstruction. Synthetic real-disk validation passes (`logs/tfile2.log`). |
 | `aggressive_scan_v5.c.tree_v1` | 2026-06-03 09:21 | The aggressive scanner with `walk_extent_tree` + `recover_orphaned_extent_tree` for depth>0 dispatch. |
-| `ext4recover_v5.c.jseq_v1` | 2026-06-03 09:39 | **Current.** Same as `tree_v1` for `ext4recover_v5.c` (Phase 5 only changes the journal module). |
-| `journal_recovery_v5.c.jseq_v1` | 2026-06-03 09:39 | **Current.** Adds Phase 5 transaction-seq aware version selection — `should_skip_for_seq` / `mark_recovered_with_seq`. A/B/C tested non-regressive. |
+| `ext4recover_v5.c.jseq_v1` | 2026-06-03 09:39 | Phase 5 wired in main; same as `tree_v1` for `ext4recover_v5.c` (Phase 5 only changes the journal module). |
+| `journal_recovery_v5.c.jseq_v1` | 2026-06-03 09:39 | Adds Phase 5 transaction-seq aware version selection. |
+| `ext4recover_v5.c.audit_v1` | 2026-06-03 10:26 | **Current.** Audit B1 (chunked pread/pwrite) + B5 (usage text). |
+| `journal_recovery_v5.c.audit_v1` | 2026-06-03 10:26 | **Current.** Audit B2 (Phase 5 unconditional replace) + B4 (O(1) calc_inode_from_block). |
+| `extent_validator_v5.c.audit_v1` | 2026-06-03 10:26 | **Current.** Audit B3 (eh_depth byte-order safe). |
 
-The active source is identical to `jseq_v1` unless you can see in-flight
+The active source is identical to `audit_v1` unless you can see in-flight
 changes via `git status`.
 
 ## Diff helpers

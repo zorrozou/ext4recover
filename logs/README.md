@@ -55,3 +55,12 @@ Captured by `record_file` in `tests/lib_recover_test.sh` before deletion.
 | `tjseq1_v2.log` | Re-run after the patch was correctly applied. DEBUG line now reads `seq=2 size=33554432 ...` proving the new code path runs. Only one candidate exists in jbd2, so size and seq strategies converge. |
 | `tjseq_ab.log` | A/B/C snapshot comparison: `dedup_v1` / `tree_v1` / `jseq_v1` all recover 5/10 md5-matching files from identical disk state. Phase 5 is non-regressive. |
 | `t0a_jseq.log` | Post-Phase-5 regression gate: T0a still recovers the 2 GB original file with md5 match. |
+
+## Audit logs (post-Phase-5 code-walkthrough fixes)
+
+| Log | What it shows |
+|-----|---------------|
+| `t0a_audit_v1.log` | Audit-fix regression gate on T0a: original + v5 normal both still recover the 2 GB file with md5 match. |
+| `tfile2_audit.log` | Phase 4 synthetic depth=1 test still PASS after B3 byte-order fix. md5 byte-identical. |
+| `tjseq_ab_audit.log` | A/B test of `jseq_v1` vs `audit_v1` on identical disk snapshot. Both recover 5/10. B2's removal of the size gate did not change journal recall in this scenario. |
+| `taudit_speed.sh` log (`taudit_speed.log`) | Cold-cache speed comparison: dedup_v1=277s, audit_v1=277s. Confirms cloud disk is IO-bound; B1's syscall reduction is hidden under device read latency. |

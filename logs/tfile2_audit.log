@@ -1,0 +1,38 @@
+nohup: ignoring input
+[11:10:11] lib loaded (v2). WORK=/mnt/work
+=== wiping /dev/vdb7 (zeroing first 4 GB) ===
+[11:10:29] mkfs /dev/vdb7 (opts: )
+=== writing target file (64 MB urandom) ===
+F: ino=12 size=67108864 md5=d7768b0e32029a99a2db0d54279bb6d8
+=== debugfs stat of inode 12 ===
+Inode: 12   Type: regular    Mode:  0644   Flags: 0x80000
+Generation: 2301576136    Version: 0x00000000:00000041
+User:     0   Group:     0   Project:     0   Size: 67108864
+File ACL: 0
+Links: 1   Blockcount: 131072
+Fragment:  Address: 0    Number: 0    Size: 0
+ ctime: 0x6a1f9b26:9ef1d3a0 -- Wed Jun  3 11:10:30 2026
+ atime: 0x6a1f9b26:ded72e1c -- Wed Jun  3 11:10:30 2026
+ mtime: 0x6a1f9b26:9ef1d3a0 -- Wed Jun  3 11:10:30 2026
+crtime: 0x6a1f9b26:85320eb0 -- Wed Jun  3 11:10:30 2026
+Size of extra inode fields: 32
+Inode checksum: 0x52d90b12
+EXTENTS:
+(0-16383):34816-51199
+EXT_LINE: (0-16383):34816-51199
+phys_start=34816 phys_end=51199 len=16384 ee_block=0
+=== forging leaf at block 1000010 and root at block 1000000 ===
+forged: leaf->34816..51199 (len=16384); root idx->leaf @ 1000010
+=== aggressive scan (verbose, grep tree-related) ===
+[INFO] Found orphaned extent tree root at 1000000, depth=1 entries=1
+[INFO] Reconstructed tree at 1000000 into /mnt/work/recover_out/tfile2_aggr/aggressive_tree_1000000 (1 extents)
+=== produced files ===
+total 65544
+drwxr-xr-x  2 root   root       4096 Jun  3 11:13 .
+drwxrwxr-x 49 ubuntu ubuntu     4096 Jun  3 11:10 ..
+-rw-r-----  1 root   root   67108864 Jun  3 11:10 aggressive_tree_1000000
+  candidate: /mnt/work/recover_out/tfile2_aggr/aggressive_tree_1000000 size=67108864 md5=d7768b0e32029a99a2db0d54279bb6d8
+  ==> MATCH on /mnt/work/recover_out/tfile2_aggr/aggressive_tree_1000000
+  candidate: /mnt/work/recover_out/tfile2_aggr/aggressive_tree_1000000 size=67108864 md5=d7768b0e32029a99a2db0d54279bb6d8
+  ==> MATCH on /mnt/work/recover_out/tfile2_aggr/aggressive_tree_1000000
+RESULT: T-FILE-2 PASS (Phase 4 tree path triggered; aggressive_tree_* md5 matches expected)

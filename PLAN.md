@@ -255,28 +255,97 @@ Status: ✅ implemented + validated. Frozen baselines:
 * `improved/baselines/ext4recover_v5.c.jseq_v1`
 * `improved/baselines/journal_recovery_v5.c.jseq_v1`
 
-## 7. Phase 6 — Targeted recovery & early exit
+## 7. Phase 6 — Targeted recovery & early exit (DECIDED NOT TO DO)
 
-* [ ] CLI flags: `--target-inode <ino>` and `--target-md5 <hex>`.
-* [ ] When set, aggressive/journal stop as soon as the target's data
-      is fully covered by `recovered_intervals` and matches md5.
-      T1 evidence: aggressive on 4 T disk hit inode 12's leaves at
-      12.8 % → would save 87 % of scan time if we early-exit.
+The original idea: CLI flags `--target-inode <ino>` and
+`--target-md5 <hex>`; aggressive/journal stop as soon as the target's
+data is fully covered. T1 evidence: aggressive on 4 T disk hit
+inode 12's leaves at 12.8 % → would save 87 % of scan time.
 
-Status: ⏳ planned.
+Reason for not doing: this is a niche workflow. A user who already
+knows the target inode number probably has another way to get the
+data. A user who knows the target md5 has the original copy, in
+which case nothing needs recovering. The mainstream user runs
+`--all` and dumps everything; the time saved by early-exit doesn't
+benefit them. Not worth the CLI surface and the per-extent md5
+streaming work.
 
-## 8. Phase 7 — Smaller robustness items (low priority)
+Status: ❌ decided not to do (low value vs effort).
 
-* [ ] Unify `Files failed` counter to count distinct inodes (currently
-      counted per-phase, can double-count system inodes).
-* [ ] Optional `O_DIRECT` mode behind a flag for the rare on-line
-      recovery case where pagecache may have zeroed leaves.
-* [ ] inline_data file recovery (very small files stored in the inode
-      itself; v5 currently skips because they have no extent flag).
-* [ ] Better stat output: per-extent-source breakdown (normal /
-      journal / orphan / aggressive / dedup-skip).
+## 8. Phase 7 — Smaller robustness items (DECIDED NOT TO DO)
 
-Status: ⏳ planned.
+The original list and the case-by-case verdict:
+
+* **Unify `Files failed` counter** — Real but cosmetic. Misleads
+  users into thinking real files failed when only system inodes
+  were skipped. Worth ~20 LoC fix but no functional impact.
+  ❌ skipped.
+* **Optional `O_DIRECT` mode** — Only useful for *online* recovery
+  (FS still mounted), which directly violates ext4recover's
+  recommended usage ("unmount first"). Encouraging this antipattern
+  is worse than not having the flag.
+  ❌ skipped.
+* **inline_data file recovery** — Real functional gap (we 100 %
+  miss < 60-byte files). But the typical user looking for inline
+  files is exotic, and no real test failure has ever traced back to
+  this. ~50 LoC + new test scaffolding. ❌ skipped.
+* **Per-source statistics** — Information density without
+  actionable insight. The `Dedup intervals: ...` line already shows
+  the dominant signal. ❌ skipped.
+
+Status: ❌ all four items decided not to do after explicit
+case-by-case evaluation.
+
+## 9. Audit — Code-walkthrough fixes (DONE)
+
+After Phase 5 we did a full code review of all 3792 LoC and found
+five concrete defects that were worth fixing — even though none of
+them affected real-disk test outcomes today, they were latent
+correctness or maintainability liabilities:
+
+* [x] **B1** — `recover_block_to_file` rewrote the per-4KB-block
+      `read+write` loop to a 1 MB chunked `pread+pwrite` (~30 LoC).
+      Functionally identical, slightly cleaner, thread-safe by
+      construction. Note: did NOT bring the expected speed-up on a
+      cloud disk because the bottleneck is device read bandwidth,
+      not syscall overhead — both old and new versions converge on
+      ~277 s for a 2 GB cold-cache recovery. The patch still
+      stands as a code-quality and future-proofing improvement
+      (NVMe / multi-spindle with deeper queue depth would benefit).
+* [x] **B2** — `recover_inode_from_journal` was still gating
+      `rename(tmp, final)` on a size comparison (`do_replace = ...
+      <= existing.size`), which silently overrode Phase 5's
+      seq-aware decision when a newer-seq version was *smaller*
+      (truncate+rewrite scenario). Removed the size check; rely on
+      `should_skip_for_seq` upstream. Phase 5 now actually
+      semantically wins where the old policy disagreed.
+* [x] **B3** — `validate_extent_header` checked
+      `eh->eh_depth > 5` without `ext2fs_le16_to_cpu()`. Worked on
+      x86 by happenstance, would silently over-permit/refuse depths
+      on big-endian hosts. 1-line fix.
+* [x] **B4** — `calc_inode_from_block()` was an O(N_groups) linear
+      scan called from the hottest journal-scanning path. Rewrote
+      to compute the group index from `fs_block / s_blocks_per_group`
+      and verify membership in O(1).
+* [x] **B5** — Help text still showed `--no-parallel` after Phase 3
+      flipped the default. Updated to `--parallel`.
+
+Real-disk validation:
+
+| Test | Result |
+|------|--------|
+| T0a regression gate | ✅ md5 match on 2 GB recovery |
+| T-FILE-2 (Phase 4 synthetic depth=1 tree) | ✅ md5 match |
+| T-JSEQ-AB (jseq_v1 vs audit_v1 on identical snapshot) | ✅ both 5/10, no regression |
+| T-AUDIT-SPEED (cold-cache 2 GB normal recovery) | dedup_v1: 277s, audit_v1: 277s — equivalent (IO-bound) |
+
+Frozen baselines:
+* `improved/baselines/ext4recover_v5.c.audit_v1`
+* `improved/baselines/journal_recovery_v5.c.audit_v1`
+* `improved/baselines/extent_validator_v5.c.audit_v1`
+
+Status: ✅ implemented + validated. This is the last code change
+intended for this project.
 
 ## 9. Test environment reference
 

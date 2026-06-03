@@ -14,8 +14,9 @@ Kernel: Ubuntu 6.8 family.
 | 3 | Aggressive parallelization | ⚠️ implemented, **disabled by default** |
 | 4 | Aggressive depth>0 file-level reconstruction | ✅ DONE |
 | 5 | Journal sequence-aware version selection | ✅ DONE |
-| 6 | `--target-inode` / `--target-md5` early exit | ⏳ planned (next) |
-| 7 | Robustness (counter unification, `O_DIRECT`, inline_data) | ⏳ planned |
+| 6 | `--target-inode` / `--target-md5` early exit | ❌ **decided not to do** (low value vs effort) |
+| 7 | Smaller robustness items | ❌ **decided not to do** (item-by-item analysis showed low value) |
+| Audit | Code-walkthrough fixes (5 items) | ✅ DONE |
 
 ## Phase 3 conclusion — parallelization is NOT a win on a single disk
 
@@ -44,10 +45,13 @@ See `docs/design-parallel.md` § "2026-06-03 update: post-implementation measure
 | `ext4recover_v5.c.parallel_optin` | Phase 3 parallelization, disabled by default |
 | `ext4recover_v5.c.tree_v1` | Phase 4 file-level reconstruction (`recover_orphaned_extent_tree`) |
 | `aggressive_scan_v5.c.tree_v1` | aggressive scanner with Phase 4 dispatch |
-| `ext4recover_v5.c.jseq_v1` | **current** — adds Phase 5 (no change to main, only journal module) |
-| `journal_recovery_v5.c.jseq_v1` | **current** — jbd2 transaction-seq aware version selection (`should_skip_for_seq` / `mark_recovered_with_seq`) |
+| `ext4recover_v5.c.jseq_v1` | Phase 5 wired in main; no main-side change vs `tree_v1` |
+| `journal_recovery_v5.c.jseq_v1` | Phase 5: jbd2 transaction-seq aware version selection |
+| `ext4recover_v5.c.audit_v1` | **current** — Audit fixes B1 (1 MB chunked pread/pwrite IO), B5 (usage text) |
+| `journal_recovery_v5.c.audit_v1` | **current** — Audit fixes B2 (Phase 5 unconditional replace), B4 (O(1) calc_inode_from_block) |
+| `extent_validator_v5.c.audit_v1` | **current** — Audit fix B3 (eh_depth byte-order safe) |
 
-The active source equals `jseq_v1` plus any in-flight changes; check `git log` for delta.
+The active source equals `audit_v1` plus any in-flight changes; check `git log` for delta.
 
 ## Real-disk evidence currently in `logs/`
 
