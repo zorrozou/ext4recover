@@ -702,7 +702,10 @@ int init_journal(struct recover_context *ctx)
     
     ctx->journal_start = be32_to_cpu(jsb->s_first);
     ctx->journal_len = be32_to_cpu(jsb->s_maxlen);
-    
+
+    /* Feed jbd2 feature flags to the capability layer (Phase 0.1) */
+    fs_capabilities_set_journal(ctx, be32_to_cpu(jsb->s_feature_incompat));
+
     ext2fs_free_mem(&buf);
     return 0;
 }

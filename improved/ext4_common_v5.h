@@ -25,6 +25,7 @@
 #include <ext2fs/ext2fs.h>
 #include <sys/stat.h>
 #include "recovered_intervals.h"
+#include "fs_capabilities.h"
 
 #define RECOVER_DIR "./RECOVER"
 #define VERSION "0.5"
@@ -97,6 +98,9 @@ struct recover_context {
     int use_parallel;          /* 1 = opt-in via --parallel; default OFF (IO-bound) */
     int n_workers;             /* worker thread count (0 = auto) */
     
+    /* On-disk format capabilities (Phase 0.1) */
+    struct fs_capabilities caps;
+
     /* Checkpoint/resume */
     int resume_mode;
     blk64_t checkpoint_journal_offset;

@@ -509,6 +509,9 @@ int main(int argc, char *argv[])
     
     LOG_INFO("Block size: %d bytes", (int)g_ctx.blocksize);
     LOG_INFO("Total blocks: %llu", (unsigned long long)g_ctx.total_blocks);
+
+    /* Detect on-disk format capabilities (Phase 0.1) */
+    fs_capabilities_detect(&g_ctx);
     
     /* Initialize cluster/bigalloc info */
     init_cluster_info(&g_ctx);
@@ -536,6 +539,9 @@ int main(int argc, char *argv[])
             LOG_INFO("Journal initialized successfully");
         }
     }
+
+    /* Print capability table (after journal probe so jbd2 fields are live) */
+    fs_capabilities_print(&g_ctx);
     
     /* Initialize filename map from active directory entries */
     if (init_filename_map(&g_ctx) == 0) {
