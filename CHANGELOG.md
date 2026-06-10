@@ -5,6 +5,155 @@ evidence), the fix, and the real-disk evidence proving the fix works.
 
 ---
 
+## [v0.6] — 2026-06-10
+
+### Overview
+
+Five rounds of correctness, performance, and new-capability work on top of
+`audit_v1`. Validated on 10 TB cloud disk with a four-era format regression
+matrix (E1 = CentOS6-era → E4 = orphan_file + fast_commit). Journal recovery
+rate: **4–6/11 → 11/11 across all four disk format eras**.
+
+### Phase 0 — Capability detection + 4-era regression matrix
+
+**`fs_capabilities.{c,h}`** — Detect on-disk capabilities once at startup from
+ext4 + jbd2 superblock feature flags. All era-dependent recovery paths gate on
+these; old-format disks degrade exactly to v5 behavior.
+
+**`tests/tcompat_matrix.sh`** — Runs two binaries against identical disk states
+on E1–E4. Class I changes must produce byte-identical manifests.
+
+### Phase A — Correctness fixes
+
+#### A1 — flex_bg inode-table interval map
+
+**Problem.** `calc_inode_from_block()` assumed `g = blk / blocks_per_group`.
+Under `flex_bg` (mkfs default since kernel 2.6.28) inode tables of member groups
+sit in the flex leader, so journal recovery silently skipped every inode outside
+the leader group's own tables.
+
+**Fix.** Precompute sorted `[start, end) → group` ranges at scan start; binary
+search replaces both O(groups) predicates.
+
+**Evidence.** `tests/tflexbg.sh`: baseline **0/48** → **48/48** md5-verified.
+
+#### A2 — Dedup zero-hole fix + links-aware version selection
+
+**Problem (dedup).** `recover_block_to_file()` returned success without writing
+when physical blocks were in the recovered-extents set — but the data lives in a
+*different* output file. Worst form: higher-seq journal re-recovery renamed an
+**empty** temp file over a 2 GB previously good recovery.
+
+**Fix.** Removed per-extent skip from `recover_block_to_file()`. Whole-file
+redundancy preserved by pre-checks at call sites.
+
+**Problem (version selection).** `ext4_ext_truncate()` restarts its jbd2 handle,
+journaling shrinking mid-truncate inode states at **higher seq** than the full
+pre-delete copy. Newest-seq-wins recovered truncated files.
+
+**Fix.** `should_skip_version()` keyed on `i_links_count`: live beats artifact;
+among live copies newest seq wins; among artifacts largest size wins.
+
+**Evidence.** `tests/tjver.sh`: X (trunc+rewrite+rm) recovers 8 MB new content;
+Y (1 GB rm) recovers full 1 GB, not a truncated fragment.
+
+#### A3 — Filename sanitization
+
+`add_filename_mapping()` now rejects names containing `/`, NUL, `.`, `..`
+(journal dir-block parsing is heuristic; hostile data could escape recover_dir).
+
+#### A4 — Defensive fixes
+
+- Orphan chain: validate `i_dtime ≤ s_inodes_count` (mirrors kernel
+  `ext4_orphan_get()`; `i_dtime` is a deletion timestamp on non-orphan inodes).
+- Same-basename collision: `resolve_output_name()` claim registry — first
+  claimant keeps the name; later inodes get `<ino>_file`.
+- `extent_tree_travel()`: index block pointers bound-checked; depth clamped ≤ 5.
+
+#### A5 — jbd2 tag wire format from journal superblock
+
+**Problem.** Tag format guessed via `flags > 0x000F → tag3`. On `metadata_csum`
+disks tags are 16-byte `journal_block_tag3_t`; the heuristic walked them as 12
+bytes, silently dropping every tag after the first in multi-tag descriptors.
+
+**Root cause.** `fs/jbd2/journal.c::journal_tag_bytes()` — format is entirely
+determined by `jsb->s_feature_incompat`.
+
+**Fix.** `fs_capabilities_set_journal()` reads `s_feature_incompat` once and
+sets `jbd2_tag_fmt` / `jbd2_tag_bytes`. Heuristic removed.
+
+**Evidence.** Combined with A1: tflexbg 0/48 → 48/48.
+
+### Phase B — Infrastructure and performance
+
+**B1** — Journal file handle opened once (`init_journal()`), reused for all
+reads. Previously ~500 K `ext2fs_file_open/close` per scan.
+
+**B2** — Journal block index (`journal_index.{c,h}`): built as side-effect of
+the existing descriptor-tag walk (zero extra passes), sorted once after scan.
+`read_tree_block_versioned()` tries the journal copy (≤ delete seq) before raw
+disk — recovers extent tree nodes already reused on disk.
+
+**B3** — `--normal` switched from per-inode random `ext2fs_read_inode()` to
+`ext2fs_open_inode_scan()` sequential prefetch.
+
+**B4** — Filename map hash table (O(N²) build → O(1)); aggressive recovered-
+block set linked list → hash set (also fixes global-static / not-reentrant).
+
+### Phase C — New capabilities
+
+All new capabilities use distinct output prefixes that never conflict with
+existing outputs. Each is independently gated on on-disk features.
+
+**C1 `--targeted`** (`revoke_scan.c`) — Parse jbd2 `REVOKE_BLOCK` records to
+get the exact list of freed metadata blocks (`__ext4_forget()` calls
+`jbd2_journal_revoke()` on every extent leaf/index). O(revoked blocks) vs
+O(total blocks). Works on all ext4/ext3 eras. Output: `targeted_<blkno>`.
+
+**C4** (`orphan_file.c`) — Parse `s_orphan_file_inum` blocks (kernel 5.15+,
+`COMPAT_ORPHAN_FILE`). Falls back to `s_last_orphan` chain on older disks.
+
+**C5** — Filename version selection uses `seq` so the most recent pre-deletion
+directory entry name wins across journal passes.
+
+**C6** (`inline_data.c`) — Recover `EXT4_INLINE_DATA_FL` files (≤ 60 bytes,
+data in `i_block[]`) from journal inode copies. Output: `inline_<name>`.
+
+**C7** (`ghost_dirent.c`) — Scan directory block gaps for pre-deletion dirent
+remnants (kernels before `6c0912739699`). On newer kernels the gap is zeroed;
+scan adds zero entries (safe auto-degrade).
+
+**C8** (`indirect_recovery.c`) — Recover `!EXT4_EXTENTS_FL` (indirect-block)
+files from journal. Covers ext3 / CentOS5/6 era disks. Output: `ind_<name>`.
+
+**C9** (`content_probe.c`) — Writes `RECOVER_DIR/manifest.tsv` after all phases:
+filename | size | fingerprint | detected_type | confidence. 22-entry magic
+table; `confidence=low` when type unknown AND entropy > 6.8 bits/byte.
+
+### Phase D — Dead code removal
+
+Removed: `aggressive_scan_free_blocks`, `validate_and_clean_extents`,
+`validate_extent_tree`, `scan_residual_extent_pointers`, `cluster_to_block`,
+`cluster_len_to_blocks`, `INODES_PER_BLOCK` macro (wrong base),
+`JBD2_FEATURE_INCOMPAT_CSUM_V3` (superseded by `fs_capabilities.h`).
+Added `-lm` to `LDFLAGS` (for `log2()` in `content_probe.c`).
+
+### Real-disk evidence (v0.6)
+
+| Test | Baseline | v0.6 |
+|------|----------|-------|
+| t0a — 2 GB multi-level extent (gold gate) | ✅ | ✅ |
+| tflexbg — 48 files across block groups, `--journal` | 0/48 | **48/48** |
+| tjver X — truncate+rewrite+rm, recover 8 MB content | ✗ wrong | **OK** |
+| tjver Y — 1 GB rm, avoid mid-truncate artifact | ✗ wrong | **OK** |
+| trevoke — `--targeted` C1, 3-file workload | — | **3/3** |
+| 4-era matrix E1 (^flex_bg, ^csum) | 6/11 | **11/11** |
+| 4-era matrix E2 (^csum) | 10/11 | **11/11** |
+| 4-era matrix E3 (current defaults) | 5/11 | **11/11** |
+| 4-era matrix E4 (orphan_file + fast_commit) | 4/11 | **11/11** |
+
+---
+
 ## [audit_v1] — 2026-06-03
 
 ### Audit ✅ — Five code-walkthrough fixes
