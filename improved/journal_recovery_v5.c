@@ -110,25 +110,100 @@ struct journal_scan_state {
 };
 
 /*
+ * A1: inode-table interval map.
+ *
+ * The audit-era calc_inode_from_block() assumed an inode table always
+ * lives inside its owning block group (g = blk / blocks_per_group).
+ * That is FALSE under flex_bg (default since e2fsprogs 1.41 / kernel
+ * 2.6.28): all inode tables of a flex group are packed into the flex
+ * group's first member, so a table block of group (leader+k), k>0,
+ * physically sits in the leader group and the assumption misses it —
+ * journal recovery silently skips every inode outside the leader
+ * group's own table.
+ *
+ * Fix: precompute a sorted array of [start, end) -> group ranges for
+ * every group's inode table, binary-search on lookup. O(groups) once,
+ * O(log groups) per query. Serves both is_inode_table_block() and
+ * calc_inode_from_block(), so the two can never disagree again.
+ */
+struct itable_range {
+    blk64_t start;      /* first block of this group's inode table */
+    blk64_t end;        /* exclusive */
+    dgrp_t  group;
+};
+
+static struct itable_range *g_itable_map = NULL;
+static int g_itable_count = 0;
+
+static int itable_range_cmp(const void *a, const void *b)
+{
+    const struct itable_range *ra = a, *rb = b;
+    if (ra->start < rb->start) return -1;
+    if (ra->start > rb->start) return 1;
+    return 0;
+}
+
+static int build_itable_map(struct recover_context *ctx)
+{
+    ext2_filsys fs = ctx->fs;
+    dgrp_t groups = fs->group_desc_count;
+    __u32 inodes_per_group = fs->super->s_inodes_per_group;
+    __u32 inode_size = EXT2_INODE_SIZE(fs->super);
+    blk64_t itb_blocks = ((blk64_t)inodes_per_group * inode_size +
+                          fs->blocksize - 1) / fs->blocksize;
+
+    free(g_itable_map);
+    g_itable_map = malloc((size_t)groups * sizeof(struct itable_range));
+    if (!g_itable_map) {
+        g_itable_count = 0;
+        return -1;
+    }
+
+    int n = 0;
+    for (dgrp_t g = 0; g < groups; g++) {
+        blk64_t start = ext2fs_inode_table_loc(fs, g);
+        if (start == 0)
+            continue;   /* uninitialized/bogus descriptor */
+        g_itable_map[n].start = start;
+        g_itable_map[n].end   = start + itb_blocks;
+        g_itable_map[n].group = g;
+        n++;
+    }
+    g_itable_count = n;
+    qsort(g_itable_map, n, sizeof(struct itable_range), itable_range_cmp);
+    return 0;
+}
+
+static void free_itable_map(void)
+{
+    free(g_itable_map);
+    g_itable_map = NULL;
+    g_itable_count = 0;
+}
+
+/* Binary search: range containing fs_block, or NULL. */
+static struct itable_range *itable_lookup(blk64_t fs_block)
+{
+    int lo = 0, hi = g_itable_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (fs_block < g_itable_map[mid].start)
+            hi = mid - 1;
+        else if (fs_block >= g_itable_map[mid].end)
+            lo = mid + 1;
+        else
+            return &g_itable_map[mid];
+    }
+    return NULL;
+}
+
+/*
  * Check if a filesystem block number is an inode table block
  */
 static int is_inode_table_block(struct journal_scan_state *state, blk64_t fs_block)
 {
-    ext2_filsys fs = state->ctx->fs;
-    dgrp_t group_count = fs->group_desc_count;
-    
-    for (dgrp_t g = 0; g < group_count; g++) {
-        blk64_t inode_table = ext2fs_inode_table_loc(fs, g);
-        __u32 inodes_per_group = fs->super->s_inodes_per_group;
-        __u32 inode_size = EXT2_INODE_SIZE(fs->super);
-        blk64_t inode_table_blocks = (inodes_per_group * inode_size + 
-                                      fs->blocksize - 1) / fs->blocksize;
-        
-        if (fs_block >= inode_table && fs_block < inode_table + inode_table_blocks) {
-            return 1;
-        }
-    }
-    return 0;
+    (void)state;
+    return itable_lookup(fs_block) != NULL;
 }
 
 /*
@@ -196,33 +271,27 @@ static void mark_recovered(struct journal_scan_state *state, __u32 ino, __u64 si
 /*
  * Calculate inode number from block number and offset within block
  */
-static __u32 calc_inode_from_block(struct recover_context *ctx, 
+static __u32 calc_inode_from_block(struct recover_context *ctx,
                                     blk64_t fs_block, int offset_in_block)
 {
-    /* O(1) lookup: compute the likely group from fs_block, then verify the
-     * block is actually inside that group's inode table. inode tables are
-     * located inside their owning block group, so the group containing
-     * fs_block is always (fs_block / s_blocks_per_group). */
+    /* A1: flex_bg-safe O(log groups) lookup via the interval map.
+     * (The previous O(1) "g = blk / blocks_per_group" shortcut broke on
+     * flex_bg disks where inode tables live in the flex-group leader.) */
     ext2_filsys fs = ctx->fs;
     __u32 inode_size = EXT2_INODE_SIZE(fs->super);
     __u32 inodes_per_group = fs->super->s_inodes_per_group;
-    __u32 blocks_per_group = fs->super->s_blocks_per_group;
-    if (blocks_per_group == 0) return 0;
-    
-    dgrp_t g = (dgrp_t)(fs_block / blocks_per_group);
-    if (g >= fs->group_desc_count) return 0;
-    
-    blk64_t inode_table = ext2fs_inode_table_loc(fs, g);
-    blk64_t inode_table_blocks = (inodes_per_group * inode_size + 
-                                  fs->blocksize - 1) / fs->blocksize;
-    if (fs_block < inode_table || fs_block >= inode_table + inode_table_blocks)
+
+    struct itable_range *r = itable_lookup(fs_block);
+    if (!r)
         return 0;
-    
-    blk64_t block_offset = fs_block - inode_table;
+
+    blk64_t block_offset = fs_block - r->start;
     int inodes_per_block = fs->blocksize / inode_size;
-    __u32 local_inode = block_offset * inodes_per_block + 
+    __u32 local_inode = block_offset * inodes_per_block +
                        offset_in_block / inode_size;
-    return g * inodes_per_group + local_inode + 1;
+    if (local_inode >= inodes_per_group)
+        return 0;
+    return r->group * inodes_per_group + local_inode + 1;
 }
 
 /*
@@ -735,6 +804,13 @@ int recover_from_journal(struct recover_context *ctx)
     struct journal_scan_state state;
     memset(&state, 0, sizeof(state));
     state.ctx = ctx;
+
+    /* A1: build the flex_bg-safe inode-table interval map once. */
+    if (build_itable_map(ctx) != 0) {
+        LOG_ERROR("Failed to build inode-table map");
+        return -1;
+    }
+
     state.recovered_inodes = calloc(MAX_RECOVERED_INODES, sizeof(__u32));
     state.recovered_sizes = calloc(MAX_RECOVERED_INODES, sizeof(__u64));
     state.recovered_seqs  = calloc(MAX_RECOVERED_INODES, sizeof(__u32));
@@ -871,7 +947,8 @@ int recover_from_journal(struct recover_context *ctx)
     ext2fs_free_mem(&data_buf);
     free(state.recovered_inodes);
     free(state.recovered_sizes); free(state.recovered_seqs);
-    
+    free_itable_map();
+
     return 0;
 }
 
