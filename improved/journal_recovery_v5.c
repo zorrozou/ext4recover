@@ -857,45 +857,44 @@ int recover_from_journal(struct recover_context *ctx)
         LOG_DEBUG(ctx, "Found descriptor block at journal offset %llu, seq %u",
                  (unsigned long long)blk, seq);
         
-        /* Parse tags in this descriptor block */
-        /* Tags start after the journal_header */
+        /* Parse tags in this descriptor block.
+         *
+         * A5: tag wire format is decided ONLY by the journal sb feature
+         * flags (mirrors fs/jbd2/journal.c::journal_tag_bytes and
+         * recovery.c::do_one_pass). The old code guessed the format per
+         * tag from a flags-value heuristic, which mis-sized csum_v3
+         * tags (16 bytes, walked as 12) and silently dropped every tag
+         * after the first one in multi-tag descriptors. */
+        int tag_bytes = ctx->caps.journal_probed ? ctx->caps.jbd2_tag_bytes : 12;
+        int tag_fmt   = ctx->caps.journal_probed ? ctx->caps.jbd2_tag_fmt
+                                                 : JBD2_TAG_FMT_V1;
         char *tagp = desc_buf + sizeof(journal_header_t);
         int remaining = ctx->blocksize - sizeof(journal_header_t);
         blk64_t data_blk = blk + 1;  /* Data blocks follow descriptor */
-        
-        while (remaining >= (int)sizeof(journal_block_tag_t)) {
-            /* Parse tag - use the simpler v1/v2 format */
-            /* Note: tag format depends on journal features */
-            journal_block_tag_t *tag = (journal_block_tag_t *)tagp;
-            
-            blk64_t fs_block = be32_to_cpu(tag->t_blocknr);
-            __u16 flags = be16_to_cpu(tag->t_flags);
-            
-            /* Some journals use 32-bit t_flags in different position */
-            /* Try to detect: if flags look wrong, try alternate parsing */
-            if (flags > 0x000F && flags != 0) {
-                /* Might be tag3 format */
+
+        while (remaining >= tag_bytes) {
+            blk64_t fs_block;
+            __u32 flags;
+
+            if (tag_fmt == JBD2_TAG_FMT_CSUM_V3) {
                 journal_block_tag3_t *tag3 = (journal_block_tag3_t *)tagp;
                 fs_block = be32_to_cpu(tag3->t_blocknr);
-                __u32 flags32 = be32_to_cpu(tag3->t_flags);
-                flags = (__u16)(flags32 & 0xFFFF);
-                
-                /* Add high 32 bits if present */
-                blk64_t hi = be32_to_cpu(tag3->t_blocknr_high);
-                fs_block |= (hi << 32);
-                
-                tagp += sizeof(journal_block_tag3_t);
-                remaining -= sizeof(journal_block_tag3_t);
+                flags    = be32_to_cpu(tag3->t_flags);
+                if (ctx->caps.jbd2_has_64bit)
+                    fs_block |= (blk64_t)be32_to_cpu(tag3->t_blocknr_high) << 32;
             } else {
-                /* Standard tag */
-                blk64_t hi = be32_to_cpu(tag->t_blocknr_high);
-                fs_block |= (hi << 32);
-                
-                int tag_sz = sizeof(journal_block_tag_t);
-                if (!(flags & JBD2_FLAG_SAME_UUID))
-                    tag_sz += 16; /* UUID follows */
-                tagp += tag_sz;
-                remaining -= tag_sz;
+                journal_block_tag_t *tag = (journal_block_tag_t *)tagp;
+                fs_block = be32_to_cpu(tag->t_blocknr);
+                flags    = be16_to_cpu(tag->t_flags);
+                if (ctx->caps.jbd2_has_64bit)
+                    fs_block |= (blk64_t)be32_to_cpu(tag->t_blocknr_high) << 32;
+            }
+
+            tagp += tag_bytes;
+            remaining -= tag_bytes;
+            if (!(flags & JBD2_FLAG_SAME_UUID)) {
+                tagp += 16;       /* UUID follows this tag */
+                remaining -= 16;
             }
             
             /* Skip if block number is unreasonable */

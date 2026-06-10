@@ -48,19 +48,21 @@ void fs_capabilities_set_journal(struct recover_context *ctx,
 
     /*
      * Wire size of one tag, NOT counting the 16-byte UUID that follows
-     * tags lacking JBD2_FLAG_SAME_UUID. Mirrors journal_tag_bytes()
-     * in fs/jbd2/journal.c:
-     *   csum_v3            -> sizeof(journal_block_tag3_t) = 16
-     *   otherwise          -> 8, +4 if 64bit (blocknr_high), and
-     *   csum_v2 keeps the same 12-byte layout as 64bit-only tags
-     *   (t_checksum shares the 16-bit slot; size unchanged).
+     * tags lacking JBD2_FLAG_SAME_UUID. Mirrors journal_tag_bytes() in
+     * fs/jbd2/journal.c (stable since commit db9ee220361d, 2014):
+     *   csum_v3 -> sizeof(journal_block_tag3_t) = 16
+     *   else    -> sizeof(journal_block_tag_t)  = 12
+     *              +2 if csum_v2, -4 if !64bit
+     * i.e. v1: 8/12, csum_v2: 10/14 (32/64-bit), csum_v3: 16.
      */
     if (c->jbd2_tag_fmt == JBD2_TAG_FMT_CSUM_V3) {
         c->jbd2_tag_bytes = 16;
     } else {
-        c->jbd2_tag_bytes = 8;
-        if (c->jbd2_has_64bit)
-            c->jbd2_tag_bytes += 4;
+        c->jbd2_tag_bytes = 12;
+        if (c->jbd2_tag_fmt == JBD2_TAG_FMT_CSUM_V2)
+            c->jbd2_tag_bytes += 2;
+        if (!c->jbd2_has_64bit)
+            c->jbd2_tag_bytes -= 4;
     }
 }
 
