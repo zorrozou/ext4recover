@@ -668,6 +668,9 @@ int main(int argc, char *argv[])
 
     /* Final statistics */
     print_stats(&g_ctx);
+
+    /* C9: write recovery manifest */
+    write_manifest(&g_ctx);
     
     /* Clear checkpoint on success */
     clear_checkpoint(&g_ctx);

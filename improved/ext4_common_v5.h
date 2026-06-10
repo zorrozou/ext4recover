@@ -207,6 +207,9 @@ void free_filename_map(struct recover_context *ctx);
 const char *resolve_output_name(struct recover_context *ctx, __u32 ino,
                                 char *buf, size_t bufsize);
 
+/* Function prototypes - C9 manifest */
+void write_manifest(struct recover_context *ctx);
+
 /* Function prototypes - C8 indirect block recovery */
 int recover_indirect_file(struct recover_context *ctx, __u32 ino,
                           struct ext2_inode_large *jinode);
