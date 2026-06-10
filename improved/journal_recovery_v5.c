@@ -87,10 +87,7 @@ typedef struct journal_superblock_s {
 #define JBD2_FLAG_LAST_TAG    0x0008
 
 /* Journal feature flags */
-#define JBD2_FEATURE_INCOMPAT_CSUM_V3  0x00000010
 
-/* Max inodes per block (for 256-byte inodes on 4K blocks = 16) */
-#define INODES_PER_BLOCK(ctx) ((ctx)->blocksize / EXT2_GOOD_OLD_INODE_SIZE)
 
 /* Track recovered inodes to avoid duplicates */
 #define MAX_RECOVERED_INODES 65536

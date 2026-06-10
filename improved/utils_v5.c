@@ -37,27 +37,7 @@ void init_cluster_info(struct recover_context *ctx)
     }
 }
 
-/*
- * Convert cluster number to block number
- * For non-bigalloc, this is identity.
- */
-blk64_t cluster_to_block(struct recover_context *ctx, blk64_t cluster)
-{
-    if (ctx->has_bigalloc)
-        return cluster * ctx->cluster_ratio;
-    return cluster;
-}
 
-/*
- * Convert cluster length to block count
- * For non-bigalloc, this is identity.
- */
-blk64_t cluster_len_to_blocks(struct recover_context *ctx, __u16 cluster_len)
-{
-    if (ctx->has_bigalloc)
-        return (__u64)cluster_len * ctx->cluster_ratio;
-    return cluster_len;
-}
 
 /* ============================================================
  * FILENAME MAPPING (DIRECTORY ENTRY RECOVERY)

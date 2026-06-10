@@ -192,8 +192,6 @@ int create_recovery_file(struct recover_context *ctx, __u32 ino, int *fd_out);
 
 /* Function prototypes - bigalloc support */
 void init_cluster_info(struct recover_context *ctx);
-blk64_t cluster_to_block(struct recover_context *ctx, blk64_t cluster);
-blk64_t cluster_len_to_blocks(struct recover_context *ctx, __u16 cluster_len);
 
 /* Function prototypes - filename mapping */
 int init_filename_map(struct recover_context *ctx);
