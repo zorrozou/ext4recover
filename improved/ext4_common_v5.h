@@ -25,6 +25,8 @@
 #include <ext2fs/ext2fs.h>
 #include <sys/stat.h>
 #include "recovered_intervals.h"
+#include "fs_capabilities.h"
+#include "journal_index.h"
 
 #define RECOVER_DIR "./RECOVER"
 #define VERSION "0.5"
@@ -42,11 +44,20 @@
 #define RECOVER_MODE_ORPHAN     0x02
 #define RECOVER_MODE_JOURNAL    0x04
 #define RECOVER_MODE_AGGRESSIVE 0x08
+#define RECOVER_MODE_TARGETED   0x10   /* C1: revoke-guided scan */
 #define RECOVER_MODE_ALL        0xFF
 
 /* Filename mapping entry */
 struct filename_entry {
     __u32 inode;
+    char name[256];
+};
+
+/* A4: output-name claim registry. First inode to ask for a basename
+ * owns it; later inodes mapping to the same basename are diverted to
+ * "<ino>_file" instead of being silently skipped / overwriting. */
+struct name_claim {
+    __u32 ino;
     char name[256];
 };
 
@@ -82,11 +93,18 @@ struct recover_context {
     blk64_t journal_start;
     blk64_t journal_len;
     int has_journal;
+    ext2_file_t journal_file;   /* B1: cached handle, opened once */
+    struct journal_index *jindex; /* B2: fs_block -> journal copies */
     
     /* Filename mapping */
     struct filename_entry *filename_map;
     int filename_count;
     int filename_capacity;
+
+    /* A4: output-name claims (collision diversion) */
+    struct name_claim *name_claims;
+    int claim_count;
+    int claim_capacity;
     
     /* Already-recovered physical block intervals (cross-phase dedup) */
     struct recovered_intervals *recovered_extents;
@@ -97,6 +115,9 @@ struct recover_context {
     int use_parallel;          /* 1 = opt-in via --parallel; default OFF (IO-bound) */
     int n_workers;             /* worker thread count (0 = auto) */
     
+    /* On-disk format capabilities (Phase 0.1) */
+    struct fs_capabilities caps;
+
     /* Checkpoint/resume */
     int resume_mode;
     blk64_t checkpoint_journal_offset;
@@ -171,8 +192,6 @@ int create_recovery_file(struct recover_context *ctx, __u32 ino, int *fd_out);
 
 /* Function prototypes - bigalloc support */
 void init_cluster_info(struct recover_context *ctx);
-blk64_t cluster_to_block(struct recover_context *ctx, blk64_t cluster);
-blk64_t cluster_len_to_blocks(struct recover_context *ctx, __u16 cluster_len);
 
 /* Function prototypes - filename mapping */
 int init_filename_map(struct recover_context *ctx);
@@ -180,6 +199,31 @@ int add_filename_mapping(struct recover_context *ctx, __u32 inode, const char *n
 const char* get_filename_for_inode(struct recover_context *ctx, __u32 inode);
 void parse_directory_blocks(struct recover_context *ctx);
 void free_filename_map(struct recover_context *ctx);
+
+/* A4: resolve final output basename for an inode, with collision
+ * diversion. Fills buf and returns it. Idempotent per inode. */
+const char *resolve_output_name(struct recover_context *ctx, __u32 ino,
+                                char *buf, size_t bufsize);
+
+/* Function prototypes - C9 manifest */
+void write_manifest(struct recover_context *ctx);
+
+/* Function prototypes - C8 indirect block recovery */
+int recover_indirect_file(struct recover_context *ctx, __u32 ino,
+                          struct ext2_inode_large *jinode);
+
+/* Function prototypes - C4 orphan file */
+int recover_orphan_file(struct recover_context *ctx);
+
+/* Function prototypes - C6 inline data */
+int recover_inline_data(struct recover_context *ctx, __u32 ino,
+                        struct ext2_inode_large *jinode);
+
+/* Function prototypes - C1 revoke targeted scan */
+int recover_from_revoke(struct recover_context *ctx);
+
+/* Function prototypes - C7 ghost dirent scan */
+void scan_ghost_dirents(struct recover_context *ctx);
 
 /* Function prototypes - checkpoint/resume */
 int save_checkpoint(struct recover_context *ctx);

@@ -37,21 +37,28 @@ int scan_orphan_chain(struct recover_context *ctx, __u32 start_ino)
             LOG_ERROR("Failed to read orphan inode %u", current_ino);
             break;
         }
-        
+
+        /* A4: i_dtime is the next-orphan pointer ONLY while an inode is
+         * on the orphan list; on ordinary deleted inodes it is a
+         * deletion timestamp. Validate like kernel ext4_orphan_get(). */
+        __u32 next_ino = inode.i_dtime;
+        if (next_ino > ctx->fs->super->s_inodes_count)
+            next_ino = 0;   /* timestamp, not a chain pointer */
+
         /* Validate this is actually a deleted file */
         if (!LINUX_S_ISREG(inode.i_mode) || inode.i_links_count != 0) {
-            LOG_DEBUG(ctx, "Inode %u not a deleted regular file, skipping", 
+            LOG_DEBUG(ctx, "Inode %u not a deleted regular file, skipping",
                      current_ino);
-            current_ino = inode.i_dtime; /* Next in chain */
+            current_ino = next_ino; /* Next in chain */
             count++;
             continue;
         }
-        
+
         /* Check if it has extent flag */
         if (!(inode.i_flags & EXT4_EXTENTS_FL)) {
-            LOG_DEBUG(ctx, "Inode %u does not use extents, skipping", 
+            LOG_DEBUG(ctx, "Inode %u does not use extents, skipping",
                      current_ino);
-            current_ino = inode.i_dtime;
+            current_ino = next_ino;
             count++;
             continue;
         }
@@ -69,9 +76,8 @@ int scan_orphan_chain(struct recover_context *ctx, __u32 start_ino)
             LOG_WARN("Failed to recover orphan inode %u", current_ino);
         }
         
-        /* Move to next orphan in chain */
-        /* i_dtime holds the next orphan inode number */
-        current_ino = inode.i_dtime;
+        /* Move to next orphan in chain (validated above) */
+        current_ino = next_ino;
         count++;
     }
     

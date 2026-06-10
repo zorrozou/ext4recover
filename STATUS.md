@@ -1,181 +1,80 @@
 # STATUS — current snapshot
 
-Date: 2026-06-03
+Date: 2026-06-10
 Server under test: `/dev/vdb` (10 T) + `/dev/vdc` (10 T) on a Tencent Cloud VM.
-Kernel: Ubuntu 6.8 family.
+Kernel: Ubuntu 6.8.0. e2fsprogs 1.47.0.
 
 ## Phase progress
 
 | Phase | Title | State |
 |-------|-------|-------|
-| 0 | Test infrastructure & golden baseline (T0a) | ✅ DONE |
-| 1 | Surface and fix v5 regressions vs original | ✅ DONE |
-| 2 | Cross-phase dedup (interval-tree) | ✅ DONE |
-| 3 | Aggressive parallelization | ⚠️ implemented, **disabled by default** |
-| 4 | Aggressive depth>0 file-level reconstruction | ✅ DONE |
-| 5 | Journal sequence-aware version selection | ✅ DONE |
-| 6 | `--target-inode` / `--target-md5` early exit | ❌ **decided not to do** (low value vs effort) |
-| 7 | Smaller robustness items | ❌ **decided not to do** (item-by-item analysis showed low value) |
-| Audit | Code-walkthrough fixes (5 items) | ✅ DONE |
+| 0 | Test infrastructure, capability detection, 4-era regression matrix | ✅ DONE |
+| A | Correctness fixes (A1–A5) | ✅ DONE |
+| B | Infrastructure + performance (B1–B4) | ✅ DONE |
+| C | New capabilities (C1–C9) | ✅ DONE |
+| D | Dead-code removal, minor fixes | ✅ DONE |
 
-## Phase 3 conclusion — parallelization is NOT a win on a single disk
+## Headline results (v0.6)
 
-We implemented the pipeline (`parallel_scan.c`, ~370 LoC: reader → worker pool → ordered writer) and validated **byte-for-byte identical output vs serial** on T-PAR-1 (40 GB, 4 files including two multi-level-extent big files: both md5 match).
-
-Then we measured throughput on a 300 GB partition (T-PAR-2) and against the raw device:
-
-| Path | Throughput | Notes |
-|------|-----------|-------|
-| Raw `dd` direct-IO seq read (physical ceiling) | **267 MB/s** | `dd if=/dev/vdb6 bs=8M iflag=direct` |
-| Serial aggressive scan (Phase 2 baseline) | **~245 MB/s** | 92 % of physical ceiling |
-| Parallel aggressive scan, 7 workers | **77–155 MB/s** | NEGATIVE — slower than serial |
-
-**Root cause**: serial scan is already at 92 % of the disk's sequential-read bandwidth. Adding worker threads on the SAME single physical device cannot help — the CPU-side magic check is not the bottleneck. The parallel pipeline only adds synchronization overhead (writer's per-hit `pread` re-read in particular) and *slows things down*.
-
-**Decision**: the parallel code stays in the tree (it's correct and may help on a striped multi-disk array or NVMe), but **default is now serial**. Users opt in with `--parallel [--workers N]`. The exit criterion for Phase 3 has been moved from "≥ 2× speedup" to "disable by default, document why."
-
-See `docs/design-parallel.md` § "2026-06-03 update: post-implementation measurement" for the full evidence table and the conditions under which parallelization *would* pay off (multi-spindle / NVMe / network-attached scratch).
-
-## Current frozen baselines (in `improved/baselines/`)
-
-| File | Meaning |
-|------|---------|
-| `ext4recover_v5.c.before_normal_fix_20260602_110302` | v5 as received — has the `eh_entries==0` regression bug |
-| `ext4recover_v5.c.dedup_v1` | normal-fix + T6-bigalloc-fix + interval-tree dedup |
-| `ext4recover_v5.c.parallel_optin` | Phase 3 parallelization, disabled by default |
-| `ext4recover_v5.c.tree_v1` | Phase 4 file-level reconstruction (`recover_orphaned_extent_tree`) |
-| `aggressive_scan_v5.c.tree_v1` | aggressive scanner with Phase 4 dispatch |
-| `ext4recover_v5.c.jseq_v1` | Phase 5 wired in main; no main-side change vs `tree_v1` |
-| `journal_recovery_v5.c.jseq_v1` | Phase 5: jbd2 transaction-seq aware version selection |
-| `ext4recover_v5.c.audit_v1` | **current** — Audit fixes B1 (1 MB chunked pread/pwrite IO), B5 (usage text) |
-| `journal_recovery_v5.c.audit_v1` | **current** — Audit fixes B2 (Phase 5 unconditional replace), B4 (O(1) calc_inode_from_block) |
-| `extent_validator_v5.c.audit_v1` | **current** — Audit fix B3 (eh_depth byte-order safe) |
-
-The active source equals `audit_v1` plus any in-flight changes; check `git log` for delta.
-
-## Real-disk evidence currently in `logs/`
-
-### Phase 0/1/2 (regression gate + dedup)
-
-| Log | What it proves |
-|-----|----------------|
-| `t0a_dedup.log` | T0a regression gate green after dedup integration; original + v5 normal both md5-match on 2 GB file |
-| `t0a_with_newverify.log` | T0a green using upgraded verify function |
-| `t1.log` | v5 4 modes (normal/journal/orphan/aggressive) on 2 GB file, all md5 match where applicable |
-| `t2.log` | Original T2 result — 2/10 (pre-dedup) |
-| `t2_dedup.log` | After dedup: 7/10 (250 % improvement) |
-| `t2_compare.log` | A/B between before-fix and after-fix v5 binaries on T2 |
-| `t4.log` | unwritten extent (`fallocate` partial-write) — all 3 binaries succeed |
-| `t6.log` | bigalloc cluster=64 K — journal/all paths green; pre-fix normal failed; post-fix normal md5-match |
-| `tdedup1.log` | 600 MB file under `--normal --journal` combined run, 1 product file emitted |
-| `tdedup2.log` | aggressive over 500 GB (timed out at 30 min by design) |
-| `tdedup2_v5_summary.log` | filtered key lines from aggressive run: 5 leaf headers found, 3 dumped, 2 skipped |
-| `regression.log` | combined T0a + T2 + T4 regression run output |
-
-### Phase 3 (parallelization, **negative result**)
-
-| Log | What it proves |
-|-----|----------------|
-| `tpar1.log` | Correctness regression: `--parallel` vs serial on 40 GB - `diff -r` IDENTICAL, both md5-match |
-| `tpar2.log` | Throughput on 300 GB: parallel @ 7 workers slower than serial. Disk is IO-bound at ~92 % of raw read ceiling. |
-| `t0a_parallel_optin.log` | Post-Phase-3 regression gate: default (serial) path still recovers 2 GB file with md5 match |
-
-### Phase 4 (file-level reconstruction)
-
-| Log | What it proves |
-|-----|----------------|
-| `tfile1.log` | Natural 1 GB file (5 extents) on /dev/vdb7 — recovered through the existing `recover_orphaned_extent_block` (leaf path) with md5 match. Phase 4 is non-disruptive. |
-| `tfile2.log` | Synthetic depth=1 test: forge a root+leaf pair pointing at a deleted file's real data extent. Aggressive emits `aggressive_tree_1000000` with md5 byte-identical to the original 64 MB file. Phase 4 code path verified to execute. |
-| `t0a_tree_v1.log` | Post-Phase-4 regression gate: T0a still recovers 2 GB with md5 match |
-
-### Phase 5 (journal seq-aware)
-
-| Log | What it proves |
-|-----|----------------|
-| `tjseq1_v2.log` | After patch fix-up - DEBUG line now reads `seq=N`, proving Phase 5 code path runs |
-| `tjseq_ab.log` | A/B/C snapshot comparison: dedup_v1 / tree_v1 / jseq_v1 all recover 5/10 md5-matching files. Phase 5 non-regressive. |
-| `t0a_jseq.log` | Post-Phase-5 regression gate: 2 GB recovery md5 match |
-
-### Audit (post-Phase-5 code walkthrough)
-
-| Log | What it proves |
-|-----|----------------|
-| `t0a_audit_v1.log` | Audit-fix regression gate: 2 GB recovery md5 match |
-| `tfile2_audit.log` | Phase 4 still PASS after B3 byte-order fix - md5 byte-identical |
-| `tjseq_ab_audit.log` | A/B `jseq_v1` vs `audit_v1` on identical disk snapshot - both 5/10. B2 size-gate removal didn't change journal recall. |
-| `taudit_speed.log` | Cold-cache speed comparison: dedup_v1=277s, audit_v1=277s. Cloud disk is IO-bound; B1's syscall reduction is hidden under device read latency. |
+| Test | Baseline (audit_v1) | v0.6 |
+|------|---------------------|------|
+| t0a — 2 GB multi-level (gold gate) | ✅ | ✅ |
+| tflexbg — 48 files spread across block groups, `--journal` | 0/48 | **48/48** |
+| tjver X/Y — version selection correctness | ✗ | ✅ |
+| 4-era matrix E1 (^flex_bg, ^csum) | 6/11 | **11/11** |
+| 4-era matrix E2 (^csum) | 10/11 | **11/11** |
+| 4-era matrix E3 (current mkfs defaults) | 5/11 | **11/11** |
+| 4-era matrix E4 (orphan_file + fast_commit) | 4/11 | **11/11** |
 
 ## Source map (improved/)
 
-| File | Lines | Role |
-|------|-------|------|
-| `ext4recover_v5.c` | ~620 | main, mode dispatch, normal-mode extent walker (`recover_from_extent_tree`, `dump_leaf_extent`, `extent_tree_travel`), `recover_block_to_file` writer with **dedup hooks** |
-| `journal_recovery_v5.c` | ~900 | jbd2 scanner, per-inode recovery, **dedup pre-check on depth-0 leaf**, **Phase 5: seq-aware version selection (`should_skip_for_seq` / `mark_recovered_with_seq`)** |
-| `aggressive_scan_v5.c` | ~610 | full-disk magic scan, leaf-level dedup pre-check, **Phase 4: `walk_extent_tree` + `recover_orphaned_extent_tree` for depth>0 file-level reconstruction** |
-| `orphan_recovery_v5.c` | ~130 | orphan list walker (rarely triggered after clean unmount) |
-| `extent_validator_v5.c` | ~250 | sanity rules for extent header / index / leaf |
-| `utils_v5.c` | ~420 | bigalloc init, filename mapping (incl. journal-dir-block scan), checkpoint json |
-| `recovered_intervals.c` | ~170 | sorted/merged physical-block interval set |
-| `recovered_intervals.h` | ~30 | API |
-| `parallel_scan.c` | ~370 | **NEW** reader/worker/writer pipeline; activated with `--parallel`; see Phase 3 notes |
-| `parallel_scan.h` | ~25 | **NEW** API |
-| `ext4_common_v5.h` | ~205 | shared types, `recover_context`, includes `recovered_intervals.h` |
-| `Makefile_v5` | small | links `-lext2fs -lcom_err -lpthread` |
+| File | Role |
+|------|------|
+| `ext4recover_v5.c` | main, mode dispatch, normal-mode extent walker, `recover_block_to_file` |
+| `journal_recovery_v5.c` | jbd2 scanner, per-inode recovery, version selection |
+| `aggressive_scan_v5.c` | full-disk magic scan, Phase 4 depth>0 file-level reconstruction |
+| `orphan_recovery_v5.c` | classic `s_last_orphan` chain walker |
+| `extent_validator_v5.c` | extent header / index sanity checks |
+| `utils_v5.c` | bigalloc init, filename mapping + ghost-dirent + hash table, checkpoint |
+| `recovered_intervals.c/h` | sorted/merged physical-block interval set (cross-phase dedup) |
+| `parallel_scan.c/h` | reader/worker/writer pipeline; opt-in via `--parallel` |
+| `fs_capabilities.c/h` | **NEW** on-disk feature-flag detection; gates all era-dependent paths |
+| `journal_index.c/h` | **NEW** B2: fs_block→journal copy versioned index |
+| `revoke_scan.c` | **NEW** C1: jbd2 revoke-block guided targeted recovery (`--targeted`) |
+| `ghost_dirent.c` | **NEW** C7: pre-deletion dirent remnant scanner |
+| `orphan_file.c` | **NEW** C4: kernel 5.15+ orphan file recovery |
+| `inline_data.c` | **NEW** C6: EXT4_INLINE_DATA_FL recovery from journal |
+| `indirect_recovery.c` | **NEW** C8: indirect-block (ext3/old ext4) recovery from journal |
+| `content_probe.c` | **NEW** C9: post-dump type sniffing + manifest.tsv |
+| `ext4_common_v5.h` | shared types, `recover_context`, capability struct |
+| `Makefile_v5` | links `-lext2fs -lcom_err -lpthread -lm` |
 
 ## Test framework (tests/)
 
 | File | Purpose |
 |------|---------|
-| `lib_recover_test.sh` | Common library: device whitelist, prepare_target, record_file, multi-name verify |
-| `t0a.sh` | **Regression gate**: 2 GB multi-level extent on /dev/vdb1; original + v5 normal |
-| `t0b.sh`/`t0b_v2.sh`/`t0b_v3.sh` | Investigations into how to produce fragmented small files (mballoc largely defeats this on modern ext4) |
-| `t1.sh` | All-mode v5 regression on 2 GB file |
-| `t2.sh` | v5 journal recovery on 10 single-extent small files of varying sizes |
-| `t2_compare.sh` | A/B test between two binary baselines on T2 inputs |
-| `t3.sh` | Forced fragmentation attempt (negative result, kept for documentation) |
-| `t4.sh` | unwritten extent (`fallocate` half-written) |
-| `t5.sh` | journal wrap boundary — exposed v5 noise-recovery limit (Phase 5 target) |
+| `lib_recover_test.sh` | device whitelist, prepare_target, record_file, verify |
+| `t0a.sh` | **Gold gate**: 2 GB multi-level extent, original + v5 --normal |
+| `tcompat_matrix.sh` | **NEW** E1–E4 four-era regression matrix |
+| `tflexbg.sh` | **NEW** A1 validation: 48 files across flex_bg block groups |
+| `tjver.sh` | **NEW** A2 validation: version selection (live vs artifact) |
+| `trevoke.sh` | **NEW** C1 validation: revoke-guided targeted recovery |
+| `t2.sh` | journal recovery on 10 single-extent small files |
+| `t4.sh` | unwritten extent (fallocate partial write) |
 | `t6.sh` | bigalloc cluster=64 K |
-| `tdedup1.sh` | normal+journal combined dedup verify |
-| `tdedup2.sh` | aggressive cross-phase dedup verify (timeboxed 30 min) |
-| `regression.sh` | T0a + T2 + T4 in sequence |
-| `audit.sh` | Manual audit helper (used during framework debugging) |
-| `test_intervals.c` | Unit test for the `recovered_intervals` data structure |
+| `tdedup2.sh` | aggressive cross-phase dedup verify |
+| `regression.sh` | T0a + T2 + T4 quick sanity bundle |
 
-## Known limits / non-bugs (do not "fix" without understanding)
+## Known limits / non-bugs
 
-1. **Single-extent small file deletion is unrecoverable by `--normal`/aggressive.**
-   This is a kernel-source-confirmed semantic of `ext4_ext_rm_leaf`
-   (`store_pblock(0); ee_len=0`). Only journal can save them, and
-   journal can only save them if jbd2 happened to retain the
-   pre-deletion inode copy (limited window).
-2. **mballoc strongly resists fragmentation.** Many of our scripted
-   attempts to force a small file to spill into ≥ 5 extents fail —
-   modern ext4 finds contiguous space even on near-full filesystems.
-   This is also why T0b stays at 0/N for `--normal`.
-3. **Aggressive on a multi-TB disk takes hours, and adding threads on
-   a single disk does NOT help.** Serial scan already runs at ~92 % of the
-   device's raw sequential-read bandwidth (267 MB/s on our test VM).
-   The implemented `--parallel` pipeline produced byte-identical output
-   but ran 20–50 % *slower* than serial on the same device — it is kept
-   in the tree as opt-in for future multi-spindle / NVMe scenarios.
-   Time-boxed tests intentionally kill the process; this is documented behavior.
-
-## How to run T0a yourself (the regression gate)
-
-```bash
-# On a Linux box with a spare ext4-capable block device of ≥ 4 GB
-# (THE DEVICE WILL BE REFORMATTED).
-edit tests/lib_recover_test.sh   # update ALLOWED_DEVS to your device
-DEV=/dev/sdX                      # your spare device, NOT a system disk
-sudo bash tests/t0a.sh
-# Expected:
-#   ----- VERIFY (original) -----
-#     OK   ino=12 size=2147483648 bigfile  -> 12_file
-#   RESULT: 1/1 recovered (md5 match after size-trunc)
-#   ORIG_RESULT=0
-#   ----- VERIFY (v5 --normal) -----
-#     OK   ino=12 size=2147483648 bigfile  -> 12_file
-#   RESULT: 1/1 recovered (md5 match after size-trunc)
-#   V5NORMAL_RESULT=0
-```
+1. **Single-extent small file deletion** is unrecoverable by `--normal` / `--aggressive`.
+   Kernel `ext4_ext_rm_leaf` zeroes the in-inode extent before journaling. Only
+   `--journal` can save them, within the journal's retention window.
+2. **mballoc resists fragmentation.** Modern ext4 finds contiguous space even
+   on near-full filesystems; forced multi-extent small files are hard to produce.
+3. **`--parallel` is opt-in, not a win on a single disk.** Serial scan runs at
+   ~92 % of the device's raw sequential-read bandwidth. Worker threads add
+   synchronization overhead. Useful on striped / NVMe arrays.
+4. **`--targeted` speedup depends on tree depth.** For files with only a few
+   single-extent leaves, revoke records are sparse and timing matches `--journal`.
+   Multi-TB disks with thousands of freed extent-tree nodes see the largest gain.

@@ -14,27 +14,45 @@
 #include "ext4_common_v5.h"
 #include "parallel_scan.h"
 
-/* Track recovered extent blocks to avoid duplicates */
-struct recovered_extent_block {
-    blk64_t block_num;
-    struct recovered_extent_block *next;
-};
+/* B4: recovered-block set as an open-addressing hash (was a linked
+ * list giving O(hits) per is_block_recovered query, called once per
+ * scanned block - billions of times on a multi-TB device).
+ * Key 0 = empty slot (block 0 is the superblock, never a candidate). */
+static blk64_t *rb_keys = NULL;
+static int rb_size = 0;        /* power of two */
+static int rb_count = 0;
 
-static struct recovered_extent_block *recovered_list = NULL;
+static int rb_grow(int min_size)
+{
+    int ns = 4096;
+    while (ns < min_size * 2) ns <<= 1;
+    blk64_t *nk = calloc(ns, sizeof(blk64_t));
+    if (!nk) return -1;
+    for (int i = 0; i < rb_size; i++) {
+        if (rb_keys && rb_keys[i]) {
+            __u64 h = (rb_keys[i] * 0x9E3779B97F4A7C15ULL) & (__u64)(ns - 1);
+            while (nk[h]) h = (h + 1) & (ns - 1);
+            nk[h] = rb_keys[i];
+        }
+    }
+    free(rb_keys);
+    rb_keys = nk;
+    rb_size = ns;
+    return 0;
+}
 
 /*
  * Check if a block was already recovered
  */
 int is_block_recovered(blk64_t block)
 {
-    struct recovered_extent_block *p = recovered_list;
-    
-    while (p) {
-        if (p->block_num == block)
+    if (!rb_size || block == 0) return 0;
+    __u64 h = (block * 0x9E3779B97F4A7C15ULL) & (__u64)(rb_size - 1);
+    while (rb_keys[h]) {
+        if (rb_keys[h] == block)
             return 1;
-        p = p->next;
+        h = (h + 1) & (__u64)(rb_size - 1);
     }
-    
     return 0;
 }
 
@@ -43,31 +61,30 @@ int is_block_recovered(blk64_t block)
  */
 static void mark_block_recovered(blk64_t block)
 {
-    struct recovered_extent_block *p;
-    
-    p = malloc(sizeof(struct recovered_extent_block));
-    if (!p)
-        return;
-    
-    p->block_num = block;
-    p->next = recovered_list;
-    recovered_list = p;
+    if (block == 0) return;
+    if (rb_count * 2 >= rb_size) {
+        if (rb_grow(rb_count + 1) != 0)
+            return;   /* OOM: dedup degrades, correctness preserved */
+    }
+    __u64 h = (block * 0x9E3779B97F4A7C15ULL) & (__u64)(rb_size - 1);
+    while (rb_keys[h]) {
+        if (rb_keys[h] == block)
+            return;
+        h = (h + 1) & (__u64)(rb_size - 1);
+    }
+    rb_keys[h] = block;
+    rb_count++;
 }
 
 /*
- * Free recovered block list
+ * Free recovered block set
  */
 static void free_recovered_list(void)
 {
-    struct recovered_extent_block *p, *next;
-    
-    p = recovered_list;
-    while (p) {
-        next = p->next;
-        free(p);
-        p = next;
-    }
-    recovered_list = NULL;
+    free(rb_keys);
+    rb_keys = NULL;
+    rb_size = 0;
+    rb_count = 0;
 }
 
 /*
@@ -542,71 +559,5 @@ int aggressive_scan(struct recover_context *ctx)
     
     LOG_INFO("Aggressive scan complete: recovered %d extent blocks",
             retval);
-    return 0;
-}
-
-/*
- * Scan only free blocks (optimization)
- * This is faster but may miss recently-freed extents
- */
-int aggressive_scan_free_blocks(struct recover_context *ctx)
-{
-    blk64_t block;
-    errcode_t retval;
-    char *buf;
-    int found = 0;
-    
-    LOG_INFO("Starting aggressive scan of free blocks only...");
-    
-    /* Load block bitmap */
-    if (!ctx->fs->block_map) {
-        retval = ext2fs_read_block_bitmap(ctx->fs);
-        if (retval) {
-            LOG_ERROR("Failed to load block bitmap");
-            return -1;
-        }
-    }
-    
-    /* Allocate read buffer */
-    retval = ext2fs_get_mem(ctx->blocksize, &buf);
-    if (retval) {
-        LOG_ERROR("Failed to allocate scan buffer");
-        return -1;
-    }
-    
-    /* Iterate through all blocks */
-    for (block = ctx->fs->super->s_first_data_block;
-         block < ext2fs_blocks_count(ctx->fs->super);
-         block++) {
-        
-        /* Only check free blocks */
-        if (!is_block_free(ctx, block))
-            continue;
-        
-        /* Already recovered? */
-        if (is_block_recovered(block))
-            continue;
-        
-        /* Progress report */
-        if (found > 0 && found % 100 == 0) {
-            LOG_INFO("Found %d orphaned extent blocks so far...", found);
-        }
-        
-        /* Read and check block */
-        retval = io_channel_read_blk64(ctx->fs->io, block, 1, buf);
-        if (retval)
-            continue;
-        
-        struct ext3_extent_header *eh = (struct ext3_extent_header *)buf;
-        if (ext2fs_le16_to_cpu(eh->eh_magic) == EXT4_EXT_MAGIC) {
-            if (recover_orphaned_extent_block(ctx, block, buf) > 0)
-                found++;
-        }
-    }
-    
-    ext2fs_free_mem(&buf);
-    free_recovered_list();
-    
-    LOG_INFO("Free block scan complete: found %d extent blocks", found);
     return 0;
 }

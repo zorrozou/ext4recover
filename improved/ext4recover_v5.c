@@ -50,22 +50,24 @@ int recover_block_to_file(int devfd, int inofd, __le32 block, __le16 len,
      * not the extent addressing format. */
     blk64_t phys_block = start;
     blk64_t block_len = len;
-    
-    /* Cross-phase dedup: if these physical blocks were already dumped,
-     * skip to avoid producing redundant copies. */
-    if (ctx && ctx->recovered_extents) {
-        int q = intervals_query(ctx->recovered_extents,
-                                (uint64_t)phys_block, (uint64_t)block_len);
-        if (q == 1) {
-            ctx->dedup_skipped++;
-            ctx->dedup_skipped_blocks += block_len;
-            LOG_DEBUG(ctx, "  dedup-skip extent phys=%llu len=%llu",
-                     (unsigned long long)phys_block,
-                     (unsigned long long)block_len);
-            return 1; /* treat as success - data already on disk */
-        }
-    }
-    
+
+    /*
+     * A2: NO per-extent dedup skip here.
+     *
+     * The old code returned "success" without writing when these
+     * physical blocks were already dumped ANYWHERE — but the data may
+     * live in a *different* output file (or an older version of this
+     * one), so the current file silently got a zero hole. Worst case
+     * observed on a real disk: a higher-seq journal re-recovery of the
+     * same inode dedup-skipped every extent and renamed an EMPTY temp
+     * file over the previously good output.
+     *
+     * Whole-file redundancy is still eliminated by the fully-covered
+     * pre-checks at the call sites (journal depth0/multi-level,
+     * aggressive leaf/tree) BEFORE any output file is touched; those
+     * carry all of the measured T-DEDUP-2 benefit. Once we decide to
+     * write a file, every extent is written for real.
+     */
     size_t chunk_bytes = (size_t)RBTF_CHUNK_BLOCKS * blocksize;
     char *buf = malloc(chunk_bytes);
     if (!buf) {
@@ -123,15 +125,12 @@ int recover_block_to_file(int devfd, int inofd, __le32 block, __le16 len,
 int create_recovery_file(struct recover_context *ctx, __u32 ino, int *fd_out)
 {
     char filename[512];
-    const char *original_name = get_filename_for_inode(ctx, ino);
-    
-    if (original_name) {
-        snprintf(filename, sizeof(filename), "%s/%s", 
-                ctx->recover_dir, original_name);
-    } else {
-        snprintf(filename, sizeof(filename), "%s/%u_file", 
-                ctx->recover_dir, ino);
-    }
+    char base[300];
+
+    /* A4: collision-safe name resolution (first claimant keeps the
+     * original basename; later same-named inodes get "<ino>_file"). */
+    resolve_output_name(ctx, ino, base, sizeof(base));
+    snprintf(filename, sizeof(filename), "%s/%s", ctx->recover_dir, base);
     
     /* Don't overwrite existing recovered files that have data */
     struct stat existing;
@@ -221,15 +220,23 @@ static int extent_tree_travel(struct recover_context *ctx,
     
     buf = malloc(ctx->blocksize);
     if (!buf) return 0;
-    
+
     ei = EXT_FIRST_INDEX(eh);
     for (i = 0; i < ext2fs_le16_to_cpu(eh->eh_entries); i++, ei++) {
         blk = ((__u64)ext2fs_le16_to_cpu(ei->ei_leaf_hi) << 32) +
               (__u64)ext2fs_le32_to_cpu(ei->ei_leaf);
-        
+
         /* ext4 extent index addresses are always in blocks, even with bigalloc */
-        
-        if (pread(ctx->device_fd, buf, ctx->blocksize, 
+
+        /* A4: bound-check the index pointer; residual/garbage slots can
+         * hold anything. Skip bad entries instead of dereferencing. */
+        if (blk < 1 || blk >= (__u64)ctx->total_blocks) {
+            LOG_DEBUG(ctx, "  idx %d: leaf block %llu out of range, skip",
+                     i, (unsigned long long)blk);
+            continue;
+        }
+
+        if (pread(ctx->device_fd, buf, ctx->blocksize,
                   (off_t)blk * ctx->blocksize) != ctx->blocksize) {
             free(buf);
             return 0;
@@ -277,6 +284,13 @@ int recover_from_extent_tree(struct recover_context *ctx, __u32 ino,
     eh = (struct ext3_extent_header *)handle_inode.i_block;
     int depth = ext2fs_le16_to_cpu(eh->eh_depth);
     int entries = ext2fs_le16_to_cpu(eh->eh_entries);
+
+    /* A4: ext4 trees never exceed depth 5; anything larger is garbage
+     * from a cleared/corrupt inode and would drive deep recursion. */
+    if (depth > 5) {
+        ext2fs_extent_free(handle);
+        return -1;
+    }
     
     /*
      * Even if entries==0 in the cleared inode, the original ext4recover
@@ -344,9 +358,9 @@ int recover_from_extent_tree(struct recover_context *ctx, __u32 ino,
     if (!ret) {
         struct stat st;
         char fname[512];
-        const char *name = get_filename_for_inode(ctx, ino);
-        if (name) snprintf(fname, sizeof(fname), "%s/%s", ctx->recover_dir, name);
-        else snprintf(fname, sizeof(fname), "%s/%u_file", ctx->recover_dir, ino);
+        char base2[300];
+        resolve_output_name(ctx, ino, base2, sizeof(base2));
+        snprintf(fname, sizeof(fname), "%s/%s", ctx->recover_dir, base2);
         if (stat(fname, &st) == 0 && st.st_size > 0) {
             ret = 1; /* partial recovery counts as success */
         }
@@ -391,6 +405,7 @@ static void usage(const char *prog)
     fprintf(stderr, "  --normal        Traditional extent tree recovery\n");
     fprintf(stderr, "  --journal       Recover from journal (default)\n");
     fprintf(stderr, "  --orphan        Recover from orphan list\n");
+    fprintf(stderr, "  --targeted      Revoke-guided scan (fast, precise; replaces aggressive for recent deletes)\n");
     fprintf(stderr, "  --aggressive    Full-disk aggressive scan\n");
     fprintf(stderr, "  --all           Use all recovery methods\n");
     fprintf(stderr, "  --resume        Resume from checkpoint\n");
@@ -411,7 +426,6 @@ int main(int argc, char *argv[])
     errcode_t retval;
     int i;
     int flags;
-    __u32 imax;
     
     memset(&g_ctx, 0, sizeof(g_ctx));
     g_ctx.mode = RECOVER_MODE_JOURNAL;
@@ -437,6 +451,8 @@ int main(int argc, char *argv[])
             g_ctx.verbose = 1;
         } else if (strcmp(argv[i], "--trim") == 0) {
             g_ctx.trim_zeros = 1;
+        } else if (strcmp(argv[i], "--targeted") == 0) {
+            g_ctx.mode |= RECOVER_MODE_TARGETED;
         } else if (strcmp(argv[i], "--parallel") == 0) {
             g_ctx.use_parallel = 1;
         } else if (strcmp(argv[i], "--workers") == 0) {
@@ -509,6 +525,9 @@ int main(int argc, char *argv[])
     
     LOG_INFO("Block size: %d bytes", (int)g_ctx.blocksize);
     LOG_INFO("Total blocks: %llu", (unsigned long long)g_ctx.total_blocks);
+
+    /* Detect on-disk format capabilities (Phase 0.1) */
+    fs_capabilities_detect(&g_ctx);
     
     /* Initialize cluster/bigalloc info */
     init_cluster_info(&g_ctx);
@@ -534,12 +553,20 @@ int main(int argc, char *argv[])
     if (g_ctx.mode & RECOVER_MODE_JOURNAL) {
         if (init_journal(&g_ctx) == 0) {
             LOG_INFO("Journal initialized successfully");
+            /* B2: pre-allocate index; entries added during main scan */
+            journal_index_build(&g_ctx);
         }
     }
+
+    /* Print capability table (after journal probe so jbd2 fields are live) */
+    fs_capabilities_print(&g_ctx);
     
     /* Initialize filename map from active directory entries */
     if (init_filename_map(&g_ctx) == 0) {
         parse_directory_blocks(&g_ctx);
+        /* C7: ghost dirent scan for pre-deletion name remnants
+         * (auto-degrades to zero hits on post-6c0912739699 kernels) */
+        scan_ghost_dirents(&g_ctx);
     }
     
     /* Execute recovery strategies */
@@ -547,7 +574,12 @@ int main(int argc, char *argv[])
     /* Phase 1: Orphan list recovery */
     if (g_ctx.mode & RECOVER_MODE_ORPHAN) {
         LOG_INFO("=== Phase 1: Orphan List Recovery ===");
-        recover_orphan_list(&g_ctx);
+        /* C4: new-format orphan file (kernel 5.15+, e2fsprogs 1.47+) */
+        if (g_ctx.caps.has_orphan_file) {
+            recover_orphan_file(&g_ctx);
+        } else {
+            recover_orphan_list(&g_ctx);
+        }
         save_checkpoint(&g_ctx);
     }
     
@@ -561,21 +593,35 @@ int main(int argc, char *argv[])
     /* Phase 3: Traditional extent tree recovery */
     if (g_ctx.mode & RECOVER_MODE_NORMAL) {
         LOG_INFO("=== Phase 3: Traditional Extent Tree Recovery ===");
-        imax = g_ctx.fs->super->s_inodes_count;
-        
-        for (__u32 icount = 3; icount <= imax; icount++) {
-            struct ext2_inode inode;
-            retval = ext2fs_read_inode(g_ctx.fs, icount, &inode);
-            if (retval) continue;
-            
-            /* Only recover deleted regular files with extent flag */
-            if (!LINUX_S_ISREG(inode.i_mode)) continue;
-            if (inode.i_links_count != 0) continue;
-            if (!(inode.i_flags & EXT4_EXTENTS_FL)) continue;
-            
-            /* Check extent header */
-            struct ext3_extent_header *eh = (struct ext3_extent_header *)inode.i_block;
-            if (ext2fs_le16_to_cpu(eh->eh_magic) != EXT4_EXT_MAGIC) continue;
+
+        /* B3: sequential buffered inode scan (ext2fs_open_inode_scan)
+         * instead of one random ext2fs_read_inode per inode - on a
+         * multi-TB fs that was hundreds of millions of random reads. */
+        ext2_inode_scan iscan;
+        ext2_ino_t icount;
+        struct ext2_inode inode;
+
+        retval = ext2fs_open_inode_scan(g_ctx.fs, 0, &iscan);
+        if (retval) {
+            LOG_ERROR("Failed to open inode scan (error %ld)", (long)retval);
+        } else {
+            while (1) {
+                retval = ext2fs_get_next_inode(iscan, &icount, &inode);
+                if (retval == EXT2_ET_BAD_BLOCK_IN_INODE_TABLE)
+                    continue;
+                if (retval || icount == 0)
+                    break;
+                if (icount < 3)
+                    continue;
+
+                /* Only recover deleted regular files with extent flag */
+                if (!LINUX_S_ISREG(inode.i_mode)) continue;
+                if (inode.i_links_count != 0) continue;
+                if (!(inode.i_flags & EXT4_EXTENTS_FL)) continue;
+
+                /* Check extent header */
+                struct ext3_extent_header *eh = (struct ext3_extent_header *)inode.i_block;
+                if (ext2fs_le16_to_cpu(eh->eh_magic) != EXT4_EXT_MAGIC) continue;
             /*
              * FIX (regression vs original): do NOT skip when eh_entries==0.
              * After ext4_ext_rm_idx() removes entries, eh_entries is decremented
@@ -594,12 +640,14 @@ int main(int argc, char *argv[])
              * transparently handles journal replay.
              */
             
-            retval = recover_from_extent_tree(&g_ctx, icount, &inode);
-            if (retval == 0) {
-                g_ctx.files_recovered++;
-            } else {
-                g_ctx.files_failed++;
+                retval = recover_from_extent_tree(&g_ctx, icount, &inode);
+                if (retval == 0) {
+                    g_ctx.files_recovered++;
+                } else {
+                    g_ctx.files_failed++;
+                }
             }
+            ext2fs_close_inode_scan(iscan);
         }
         save_checkpoint(&g_ctx);
     }
@@ -611,8 +659,18 @@ int main(int argc, char *argv[])
         save_checkpoint(&g_ctx);
     }
     
+    /* Phase 5: C1 Targeted revoke-guided recovery */
+    if (g_ctx.mode & RECOVER_MODE_TARGETED) {
+        LOG_INFO("=== Phase 5: Targeted Revoke-Guided Scan ===");
+        recover_from_revoke(&g_ctx);
+        save_checkpoint(&g_ctx);
+    }
+
     /* Final statistics */
     print_stats(&g_ctx);
+
+    /* C9: write recovery manifest */
+    write_manifest(&g_ctx);
     
     /* Clear checkpoint on success */
     clear_checkpoint(&g_ctx);
@@ -621,6 +679,7 @@ int main(int argc, char *argv[])
     
     /* Cleanup */
     free_filename_map(&g_ctx);
+    journal_index_free(&g_ctx);
     if (g_ctx.has_journal) {
         close_journal(&g_ctx);
     }
