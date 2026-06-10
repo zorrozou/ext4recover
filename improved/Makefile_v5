@@ -6,7 +6,7 @@ LDFLAGS = -lext2fs -lcom_err -lpthread
 
 SRCS = ext4recover_v5.c orphan_recovery_v5.c journal_recovery_v5.c \
        extent_validator_v5.c aggressive_scan_v5.c utils_v5.c recovered_intervals.c parallel_scan.c \
-       fs_capabilities.c journal_index.c
+       fs_capabilities.c journal_index.c revoke_scan.c ghost_dirent.c
 OBJS = $(SRCS:.c=.o)
 
 all: ext4recover_v5

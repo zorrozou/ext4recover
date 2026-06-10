@@ -44,6 +44,7 @@
 #define RECOVER_MODE_ORPHAN     0x02
 #define RECOVER_MODE_JOURNAL    0x04
 #define RECOVER_MODE_AGGRESSIVE 0x08
+#define RECOVER_MODE_TARGETED   0x10   /* C1: revoke-guided scan */
 #define RECOVER_MODE_ALL        0xFF
 
 /* Filename mapping entry */
@@ -205,6 +206,12 @@ void free_filename_map(struct recover_context *ctx);
  * diversion. Fills buf and returns it. Idempotent per inode. */
 const char *resolve_output_name(struct recover_context *ctx, __u32 ino,
                                 char *buf, size_t bufsize);
+
+/* Function prototypes - C1 revoke targeted scan */
+int recover_from_revoke(struct recover_context *ctx);
+
+/* Function prototypes - C7 ghost dirent scan */
+void scan_ghost_dirents(struct recover_context *ctx);
 
 /* Function prototypes - checkpoint/resume */
 int save_checkpoint(struct recover_context *ctx);

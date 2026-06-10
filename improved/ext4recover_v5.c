@@ -405,6 +405,7 @@ static void usage(const char *prog)
     fprintf(stderr, "  --normal        Traditional extent tree recovery\n");
     fprintf(stderr, "  --journal       Recover from journal (default)\n");
     fprintf(stderr, "  --orphan        Recover from orphan list\n");
+    fprintf(stderr, "  --targeted      Revoke-guided scan (fast, precise; replaces aggressive for recent deletes)\n");
     fprintf(stderr, "  --aggressive    Full-disk aggressive scan\n");
     fprintf(stderr, "  --all           Use all recovery methods\n");
     fprintf(stderr, "  --resume        Resume from checkpoint\n");
@@ -450,6 +451,8 @@ int main(int argc, char *argv[])
             g_ctx.verbose = 1;
         } else if (strcmp(argv[i], "--trim") == 0) {
             g_ctx.trim_zeros = 1;
+        } else if (strcmp(argv[i], "--targeted") == 0) {
+            g_ctx.mode |= RECOVER_MODE_TARGETED;
         } else if (strcmp(argv[i], "--parallel") == 0) {
             g_ctx.use_parallel = 1;
         } else if (strcmp(argv[i], "--workers") == 0) {
@@ -561,6 +564,9 @@ int main(int argc, char *argv[])
     /* Initialize filename map from active directory entries */
     if (init_filename_map(&g_ctx) == 0) {
         parse_directory_blocks(&g_ctx);
+        /* C7: ghost dirent scan for pre-deletion name remnants
+         * (auto-degrades to zero hits on post-6c0912739699 kernels) */
+        scan_ghost_dirents(&g_ctx);
     }
     
     /* Execute recovery strategies */
@@ -648,6 +654,13 @@ int main(int argc, char *argv[])
         save_checkpoint(&g_ctx);
     }
     
+    /* Phase 5: C1 Targeted revoke-guided recovery */
+    if (g_ctx.mode & RECOVER_MODE_TARGETED) {
+        LOG_INFO("=== Phase 5: Targeted Revoke-Guided Scan ===");
+        recover_from_revoke(&g_ctx);
+        save_checkpoint(&g_ctx);
+    }
+
     /* Final statistics */
     print_stats(&g_ctx);
     
