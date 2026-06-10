@@ -207,6 +207,17 @@ void free_filename_map(struct recover_context *ctx);
 const char *resolve_output_name(struct recover_context *ctx, __u32 ino,
                                 char *buf, size_t bufsize);
 
+/* Function prototypes - C8 indirect block recovery */
+int recover_indirect_file(struct recover_context *ctx, __u32 ino,
+                          struct ext2_inode_large *jinode);
+
+/* Function prototypes - C4 orphan file */
+int recover_orphan_file(struct recover_context *ctx);
+
+/* Function prototypes - C6 inline data */
+int recover_inline_data(struct recover_context *ctx, __u32 ino,
+                        struct ext2_inode_large *jinode);
+
 /* Function prototypes - C1 revoke targeted scan */
 int recover_from_revoke(struct recover_context *ctx);
 

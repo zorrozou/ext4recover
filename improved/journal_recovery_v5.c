@@ -678,8 +678,44 @@ static int process_inode_table_block(struct journal_scan_state *state,
             continue;
         
         /* Check if this inode uses extents (flag 0x80000) */
-        if (!(jinode->i_flags & EXT4_EXTENTS_FL))
-            continue;
+        if (!(jinode->i_flags & EXT4_EXTENTS_FL)) {
+            /* C6: inline_data — tiny files stored in i_block */
+            if (ctx->caps.has_inline_data &&
+                (jinode->i_flags & EXT4_INLINE_DATA_FL)) {
+                __u32 ino = calc_inode_from_block(ctx, fs_block, i * inode_size);
+                if (ino > EXT2_GOOD_OLD_FIRST_INO) {
+                    struct ext2_inode cur;
+                    if (ext2fs_read_inode(ctx->fs, ino, &cur) == 0 &&
+                        cur.i_links_count == 0) {
+                        if (should_skip_version(&state, ino, seq, file_size,
+                                                jinode->i_links_count > 0))
+                            goto next_inode;
+                        if (recover_inline_data(ctx, ino, jinode) == 0) {
+                            mark_version(&state, ino, file_size, seq,
+                                        jinode->i_links_count > 0);
+                        }
+                    }
+                }
+            }
+            /* C8: indirect block recovery for !extent old-format files */
+            if (!(jinode->i_flags & EXT4_INLINE_DATA_FL) && file_size > 0) {
+                __u32 ino = calc_inode_from_block(ctx, fs_block, i * inode_size);
+                if (ino > EXT2_GOOD_OLD_FIRST_INO) {
+                    struct ext2_inode cur;
+                    if (ext2fs_read_inode(ctx->fs, ino, &cur) == 0 &&
+                        cur.i_links_count == 0) {
+                        if (!should_skip_version(&state, ino, seq, file_size,
+                                                 jinode->i_links_count > 0)) {
+                            if (recover_indirect_file(ctx, ino, jinode) == 0) {
+                                mark_version(&state, ino, file_size, seq,
+                                            jinode->i_links_count > 0);
+                            }
+                        }
+                    }
+                }
+            }
+            goto next_inode;
+        }
         
         /* Check extent header magic */
         struct ext3_extent_header *eh = (struct ext3_extent_header *)jinode->i_block;
@@ -733,8 +769,9 @@ static int process_inode_table_block(struct journal_scan_state *state,
         } else if (r == 1) {
             mark_version(state, ino, 0, seq, is_live);
         }
+next_inode:;
     }
-    
+
     return recovered;
 }
 

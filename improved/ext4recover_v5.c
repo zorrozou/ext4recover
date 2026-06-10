@@ -574,7 +574,12 @@ int main(int argc, char *argv[])
     /* Phase 1: Orphan list recovery */
     if (g_ctx.mode & RECOVER_MODE_ORPHAN) {
         LOG_INFO("=== Phase 1: Orphan List Recovery ===");
-        recover_orphan_list(&g_ctx);
+        /* C4: new-format orphan file (kernel 5.15+, e2fsprogs 1.47+) */
+        if (g_ctx.caps.has_orphan_file) {
+            recover_orphan_file(&g_ctx);
+        } else {
+            recover_orphan_list(&g_ctx);
+        }
         save_checkpoint(&g_ctx);
     }
     
