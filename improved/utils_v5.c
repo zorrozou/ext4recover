@@ -64,6 +64,52 @@ blk64_t cluster_len_to_blocks(struct recover_context *ctx, __u16 cluster_len)
  * ============================================================ */
 
 /*
+ * B4: ino -> filename_map index hash (open addressing, linear probe).
+ * add_filename_mapping was O(N) dup-check per insert (O(N^2) build,
+ * up to 1e10 compares at the 100K-entry cap) and get_filename_for_inode
+ * was O(N) per recovered file. Key 0 = empty slot (inode 0 is invalid).
+ */
+static __u32 *fm_hkeys = NULL;
+static int   *fm_hvals = NULL;
+static int    fm_hsize = 0;
+
+static void fm_hash_put(__u32 ino, int idx)
+{
+    if (!fm_hsize) return;
+    __u32 h = (ino * 2654435761u) & (fm_hsize - 1);
+    while (fm_hkeys[h] != 0 && fm_hkeys[h] != ino)
+        h = (h + 1) & (fm_hsize - 1);
+    fm_hkeys[h] = ino;
+    fm_hvals[h] = idx;
+}
+
+static int fm_hash_get(__u32 ino)
+{
+    if (!fm_hsize) return -1;
+    __u32 h = (ino * 2654435761u) & (fm_hsize - 1);
+    while (fm_hkeys[h] != 0) {
+        if (fm_hkeys[h] == ino)
+            return fm_hvals[h];
+        h = (h + 1) & (fm_hsize - 1);
+    }
+    return -1;
+}
+
+static int fm_hash_rebuild(struct recover_context *ctx, int min_size)
+{
+    int ns = 1024;
+    while (ns < min_size * 2) ns <<= 1;   /* keep load factor <= 50% */
+    __u32 *nk = calloc(ns, sizeof(__u32));
+    int   *nv = calloc(ns, sizeof(int));
+    if (!nk || !nv) { free(nk); free(nv); return -1; }
+    free(fm_hkeys); free(fm_hvals);
+    fm_hkeys = nk; fm_hvals = nv; fm_hsize = ns;
+    for (int i = 0; i < ctx->filename_count; i++)
+        fm_hash_put(ctx->filename_map[i].inode, i);
+    return 0;
+}
+
+/*
  * Initialize filename mapping table
  */
 int init_filename_map(struct recover_context *ctx)
@@ -75,6 +121,7 @@ int init_filename_map(struct recover_context *ctx)
         LOG_ERROR("Failed to allocate filename map");
         return -1;
     }
+    fm_hash_rebuild(ctx, ctx->filename_capacity);
     return 0;
 }
 
@@ -109,16 +156,15 @@ int add_filename_mapping(struct recover_context *ctx, __u32 inode, const char *n
     /* A3: never let unsafe names enter the map */
     if (!filename_is_safe(name))
         return -1;
-    
-    /* Check for duplicates (update if exists) */
-    for (int i = 0; i < ctx->filename_count; i++) {
-        if (ctx->filename_map[i].inode == inode) {
-            strncpy(ctx->filename_map[i].name, name, 255);
-            ctx->filename_map[i].name[255] = '\0';
-            return 0;
-        }
+
+    /* B4: O(1) duplicate check (update if exists) */
+    int hidx = fm_hash_get(inode);
+    if (hidx >= 0) {
+        strncpy(ctx->filename_map[hidx].name, name, 255);
+        ctx->filename_map[hidx].name[255] = '\0';
+        return 0;
     }
-    
+
     /* Grow if needed */
     if (ctx->filename_count >= ctx->filename_capacity) {
         int new_cap = ctx->filename_capacity * 2;
@@ -127,18 +173,23 @@ int add_filename_mapping(struct recover_context *ctx, __u32 inode, const char *n
             LOG_WARN("Filename map full (%d entries)", ctx->filename_count);
             return -1;
         }
-        struct filename_entry *new_map = realloc(ctx->filename_map, 
+        struct filename_entry *new_map = realloc(ctx->filename_map,
                                                   new_cap * sizeof(struct filename_entry));
         if (!new_map) return -1;
         ctx->filename_map = new_map;
         ctx->filename_capacity = new_cap;
     }
-    
+
+    /* keep hash at <=50% load */
+    if (fm_hsize && ctx->filename_count * 2 >= fm_hsize)
+        fm_hash_rebuild(ctx, ctx->filename_count + 1);
+
     ctx->filename_map[ctx->filename_count].inode = inode;
     strncpy(ctx->filename_map[ctx->filename_count].name, name, 255);
     ctx->filename_map[ctx->filename_count].name[255] = '\0';
+    fm_hash_put(inode, ctx->filename_count);
     ctx->filename_count++;
-    
+
     return 0;
 }
 
@@ -149,11 +200,10 @@ const char* get_filename_for_inode(struct recover_context *ctx, __u32 inode)
 {
     if (!ctx->filename_map)
         return NULL;
-    
-    for (int i = 0; i < ctx->filename_count; i++) {
-        if (ctx->filename_map[i].inode == inode)
-            return ctx->filename_map[i].name;
-    }
+
+    int idx = fm_hash_get(inode);
+    if (idx >= 0 && idx < ctx->filename_count)
+        return ctx->filename_map[idx].name;
     return NULL;
 }
 
@@ -168,6 +218,8 @@ void free_filename_map(struct recover_context *ctx)
     }
     ctx->filename_count = 0;
     ctx->filename_capacity = 0;
+    free(fm_hkeys); free(fm_hvals);
+    fm_hkeys = NULL; fm_hvals = NULL; fm_hsize = 0;
     free(ctx->name_claims);
     ctx->name_claims = NULL;
     ctx->claim_count = 0;

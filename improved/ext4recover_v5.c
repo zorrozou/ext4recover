@@ -425,7 +425,6 @@ int main(int argc, char *argv[])
     errcode_t retval;
     int i;
     int flags;
-    __u32 imax;
     
     memset(&g_ctx, 0, sizeof(g_ctx));
     g_ctx.mode = RECOVER_MODE_JOURNAL;
@@ -551,6 +550,8 @@ int main(int argc, char *argv[])
     if (g_ctx.mode & RECOVER_MODE_JOURNAL) {
         if (init_journal(&g_ctx) == 0) {
             LOG_INFO("Journal initialized successfully");
+            /* B2: pre-allocate index; entries added during main scan */
+            journal_index_build(&g_ctx);
         }
     }
 
@@ -581,21 +582,35 @@ int main(int argc, char *argv[])
     /* Phase 3: Traditional extent tree recovery */
     if (g_ctx.mode & RECOVER_MODE_NORMAL) {
         LOG_INFO("=== Phase 3: Traditional Extent Tree Recovery ===");
-        imax = g_ctx.fs->super->s_inodes_count;
-        
-        for (__u32 icount = 3; icount <= imax; icount++) {
-            struct ext2_inode inode;
-            retval = ext2fs_read_inode(g_ctx.fs, icount, &inode);
-            if (retval) continue;
-            
-            /* Only recover deleted regular files with extent flag */
-            if (!LINUX_S_ISREG(inode.i_mode)) continue;
-            if (inode.i_links_count != 0) continue;
-            if (!(inode.i_flags & EXT4_EXTENTS_FL)) continue;
-            
-            /* Check extent header */
-            struct ext3_extent_header *eh = (struct ext3_extent_header *)inode.i_block;
-            if (ext2fs_le16_to_cpu(eh->eh_magic) != EXT4_EXT_MAGIC) continue;
+
+        /* B3: sequential buffered inode scan (ext2fs_open_inode_scan)
+         * instead of one random ext2fs_read_inode per inode - on a
+         * multi-TB fs that was hundreds of millions of random reads. */
+        ext2_inode_scan iscan;
+        ext2_ino_t icount;
+        struct ext2_inode inode;
+
+        retval = ext2fs_open_inode_scan(g_ctx.fs, 0, &iscan);
+        if (retval) {
+            LOG_ERROR("Failed to open inode scan (error %ld)", (long)retval);
+        } else {
+            while (1) {
+                retval = ext2fs_get_next_inode(iscan, &icount, &inode);
+                if (retval == EXT2_ET_BAD_BLOCK_IN_INODE_TABLE)
+                    continue;
+                if (retval || icount == 0)
+                    break;
+                if (icount < 3)
+                    continue;
+
+                /* Only recover deleted regular files with extent flag */
+                if (!LINUX_S_ISREG(inode.i_mode)) continue;
+                if (inode.i_links_count != 0) continue;
+                if (!(inode.i_flags & EXT4_EXTENTS_FL)) continue;
+
+                /* Check extent header */
+                struct ext3_extent_header *eh = (struct ext3_extent_header *)inode.i_block;
+                if (ext2fs_le16_to_cpu(eh->eh_magic) != EXT4_EXT_MAGIC) continue;
             /*
              * FIX (regression vs original): do NOT skip when eh_entries==0.
              * After ext4_ext_rm_idx() removes entries, eh_entries is decremented
@@ -614,12 +629,14 @@ int main(int argc, char *argv[])
              * transparently handles journal replay.
              */
             
-            retval = recover_from_extent_tree(&g_ctx, icount, &inode);
-            if (retval == 0) {
-                g_ctx.files_recovered++;
-            } else {
-                g_ctx.files_failed++;
+                retval = recover_from_extent_tree(&g_ctx, icount, &inode);
+                if (retval == 0) {
+                    g_ctx.files_recovered++;
+                } else {
+                    g_ctx.files_failed++;
+                }
             }
+            ext2fs_close_inode_scan(iscan);
         }
         save_checkpoint(&g_ctx);
     }
@@ -641,6 +658,7 @@ int main(int argc, char *argv[])
     
     /* Cleanup */
     free_filename_map(&g_ctx);
+    journal_index_free(&g_ctx);
     if (g_ctx.has_journal) {
         close_journal(&g_ctx);
     }

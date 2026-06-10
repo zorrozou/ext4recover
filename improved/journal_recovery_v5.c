@@ -303,11 +303,37 @@ static __u32 calc_inode_from_block(struct recover_context *ctx,
 }
 
 /*
+ * B2: read a metadata (extent tree) block as it looked AT OR BEFORE
+ * transaction `seq`. The journal's versioned copy is authoritative for
+ * a deleted file's tree: the on-disk block may have been reused by a
+ * newer file while still carrying a valid-looking extent magic. Falls
+ * back to the raw disk when the journal holds no copy.
+ * Returns 0 on success (buf filled), -1 if neither source works.
+ */
+static int read_tree_block_versioned(struct recover_context *ctx,
+                                     blk64_t blk, __u32 seq, char *buf)
+{
+    if (journal_index_read(ctx, blk, seq, buf) > 0) {
+        struct ext3_extent_header *eh = (struct ext3_extent_header *)buf;
+        if (ext2fs_le16_to_cpu(eh->eh_magic) == EXT4_EXT_MAGIC)
+            return 0;
+    }
+    if (pread(ctx->device_fd, buf, ctx->blocksize,
+              (off_t)blk * ctx->blocksize) == ctx->blocksize) {
+        struct ext3_extent_header *eh = (struct ext3_extent_header *)buf;
+        if (ext2fs_le16_to_cpu(eh->eh_magic) == EXT4_EXT_MAGIC)
+            return 0;
+    }
+    return -1;
+}
+
+/*
  * Try to recover a file from extent data found in journal inode
  */
 static int recover_inode_from_journal(struct recover_context *ctx,
                                        __u32 ino,
-                                       struct ext2_inode_large *jinode)
+                                       struct ext2_inode_large *jinode,
+                                       __u32 seq)
 {
     struct ext3_extent_header *eh;
     struct ext3_extent *ee;
@@ -338,22 +364,20 @@ static int recover_inode_from_journal(struct recover_context *ctx,
          * Those leaf blocks were freed but may still be physically intact. */
         LOG_DEBUG(ctx, "Journal inode %u has depth=%u extent tree, reading child blocks", ino, depth);
         
-        /* First verify at least one child block is still valid before overwriting */
+        /* First verify at least one child block is still reachable
+         * (journal version <= seq preferred, disk fallback). */
         struct ext3_extent_idx *idx_check = (struct ext3_extent_idx *)(eh + 1);
         int any_valid = 0;
         for (int i = 0; i < entries; i++, idx_check++) {
             blk64_t child_blk = ext2fs_le32_to_cpu(idx_check->ei_leaf) +
                 ((__u64)ext2fs_le16_to_cpu(idx_check->ei_leaf_hi) << 32);
             if (child_blk == 0 || child_blk >= ctx->total_blocks) continue;
-            
+
             char *vbuf;
             if (ext2fs_get_mem(ctx->blocksize, &vbuf)) continue;
-            ssize_t vread = pread(ctx->device_fd, vbuf, ctx->blocksize,
-                                  (off_t)child_blk * ctx->blocksize);
-            if (vread == ctx->blocksize) {
+            if (read_tree_block_versioned(ctx, child_blk, seq, vbuf) == 0) {
                 struct ext3_extent_header *veh = (struct ext3_extent_header *)vbuf;
-                if (ext2fs_le16_to_cpu(veh->eh_magic) == EXT4_EXT_MAGIC &&
-                    ext2fs_le16_to_cpu(veh->eh_entries) > 0) {
+                if (ext2fs_le16_to_cpu(veh->eh_entries) > 0) {
                     any_valid = 1;
                     ext2fs_free_mem(&vbuf);
                     break;
@@ -432,24 +456,19 @@ static int recover_inode_from_journal(struct recover_context *ctx,
             
             if (child_blk == 0 || child_blk >= ctx->total_blocks)
                 continue;
-            
-            /* Read child block directly from raw device fd (bypass ext2fs bitmap) */
-            off_t seek_pos = (off_t)child_blk * ctx->blocksize;
+
+            /* B2: versioned read - journal copy (<= seq) first, disk
+             * fallback. Recovers trees whose leaves were reused on disk. */
             char *cbuf;
             retval = ext2fs_get_mem(ctx->blocksize, &cbuf);
             if (retval) continue;
-            
-            ssize_t nread = pread(ctx->device_fd, cbuf, ctx->blocksize, seek_pos);
-            if (nread != ctx->blocksize) {
+
+            if (read_tree_block_versioned(ctx, child_blk, seq, cbuf) != 0) {
                 ext2fs_free_mem(&cbuf);
                 continue;
             }
-            
+
             struct ext3_extent_header *ceh = (struct ext3_extent_header *)cbuf;
-            if (ext2fs_le16_to_cpu(ceh->eh_magic) != EXT4_EXT_MAGIC) {
-                ext2fs_free_mem(&cbuf);
-                continue;
-            }
             
             if (ceh->eh_depth == 0) {
                 /* Leaf block - recover all extents */
@@ -476,17 +495,16 @@ static int recover_inode_from_journal(struct recover_context *ctx,
                     blk64_t leaf_blk = ext2fs_le32_to_cpu(idx2->ei_leaf) +
                         ((__u64)ext2fs_le16_to_cpu(idx2->ei_leaf_hi) << 32);
                     if (leaf_blk == 0 || leaf_blk >= ctx->total_blocks) continue;
-                    
+
                     char *lbuf;
                     if (ext2fs_get_mem(ctx->blocksize, &lbuf)) continue;
-                    if (pread(ctx->device_fd, lbuf, ctx->blocksize,
-                             (off_t)leaf_blk * ctx->blocksize) != ctx->blocksize) {
+                    if (read_tree_block_versioned(ctx, leaf_blk, seq, lbuf) != 0) {
                         ext2fs_free_mem(&lbuf);
                         continue;
                     }
-                    
+
                     struct ext3_extent_header *leh = (struct ext3_extent_header *)lbuf;
-                    if (ext2fs_le16_to_cpu(leh->eh_magic) == EXT4_EXT_MAGIC && leh->eh_depth == 0) {
+                    if (leh->eh_depth == 0) {
                         struct ext3_extent *lee = (struct ext3_extent *)(leh + 1);
                         int l_entries = ext2fs_le16_to_cpu(leh->eh_entries);
                         for (int k = 0; k < l_entries; k++, lee++) {
@@ -708,7 +726,7 @@ static int process_inode_table_block(struct journal_scan_state *state,
 
         /* Try to recover. Return: 0 = output (re)written, 1 = processed
          * but existing output kept (redundant version). */
-        int r = recover_inode_from_journal(ctx, ino, jinode);
+        int r = recover_inode_from_journal(ctx, ino, jinode, seq);
         if (r == 0) {
             mark_version(state, ino, file_size, seq, is_live);
             recovered++;
@@ -748,31 +766,30 @@ static int is_standalone_extent_block(char *buf, int blocksize)
 }
 
 /*
- * Read a journal block by offset within the journal inode
+ * Read a journal block by offset within the journal inode.
+ * B1: uses the cached handle opened by init_journal() - the previous
+ * version did ext2fs_file_open + llseek + read + close PER BLOCK,
+ * i.e. ~500K open/close cycles for a default 1GB journal scanned twice.
  */
-static int read_journal_block(struct recover_context *ctx, blk64_t journal_blk, 
+static int read_journal_block(struct recover_context *ctx, blk64_t journal_blk,
                               char *buf)
 {
-    ext2_file_t jfile;
     unsigned int got;
     errcode_t retval;
-    
-    retval = ext2fs_file_open(ctx->fs, ctx->fs->super->s_journal_inum, 0, &jfile);
-    if (retval) return -1;
-    
-    retval = ext2fs_file_llseek(jfile, (__u64)journal_blk * ctx->blocksize, 
-                                EXT2_SEEK_SET, NULL);
-    if (retval) {
-        ext2fs_file_close(jfile);
+
+    if (!ctx->journal_file)
         return -1;
-    }
-    
-    retval = ext2fs_file_read(jfile, buf, ctx->blocksize, &got);
-    ext2fs_file_close(jfile);
-    
+
+    retval = ext2fs_file_llseek(ctx->journal_file,
+                                (__u64)journal_blk * ctx->blocksize,
+                                EXT2_SEEK_SET, NULL);
+    if (retval)
+        return -1;
+
+    retval = ext2fs_file_read(ctx->journal_file, buf, ctx->blocksize, &got);
     if (retval || (int)got != ctx->blocksize)
         return -1;
-    
+
     return 0;
 }
 
@@ -807,7 +824,16 @@ int init_journal(struct recover_context *ctx)
     
     LOG_INFO("Journal is in inode %u", ctx->fs->super->s_journal_inum);
     ctx->journal_fd = -1;
-    
+
+    /* B1: open the journal inode once; all reads go through this. */
+    retval = ext2fs_file_open(ctx->fs, ctx->fs->super->s_journal_inum, 0,
+                              &ctx->journal_file);
+    if (retval) {
+        LOG_ERROR("Failed to open journal inode (error %ld)", (long)retval);
+        ctx->journal_file = NULL;
+        return -1;
+    }
+
     retval = ext2fs_get_mem(ctx->blocksize, &buf);
     if (retval) return -1;
     
@@ -974,7 +1000,12 @@ int recover_from_journal(struct recover_context *ctx)
             
             /* Read the corresponding data block from journal */
             if (data_blk >= ctx->journal_len) break;
-            
+
+            /* B2: record fs_block->journal_blk mapping in-flight. */
+            if (ctx->jindex && fs_block != 0 && fs_block < ctx->total_blocks)
+                jindex_add(ctx->jindex, fs_block, (__u32)data_blk, seq,
+                           flags & JBD2_FLAG_ESCAPE);
+
             if (read_journal_block(ctx, data_blk, data_buf) != 0) {
                 data_blk++;
                 if (flags & JBD2_FLAG_LAST_TAG) break;
@@ -1009,7 +1040,14 @@ int recover_from_journal(struct recover_context *ctx)
     
     LOG_INFO("Journal scan complete. Recovered %lu files from journal.",
             ctx->journal_recovered);
-    
+
+    /* B2: index is now fully populated; sort once for binary search. */
+    if (ctx->jindex) {
+        jindex_sort(ctx->jindex);
+        LOG_INFO("Journal block index: %d versioned copies mapped",
+                 ctx->jindex->count);
+    }
+
     ext2fs_free_mem(&desc_buf);
     ext2fs_free_mem(&data_buf);
     free(state.recovered_inodes);
@@ -1025,6 +1063,10 @@ int recover_from_journal(struct recover_context *ctx)
  */
 void close_journal(struct recover_context *ctx)
 {
+    if (ctx->journal_file) {
+        ext2fs_file_close(ctx->journal_file);
+        ctx->journal_file = NULL;
+    }
     if (ctx->journal_fd >= 0) {
         close(ctx->journal_fd);
         ctx->journal_fd = -1;

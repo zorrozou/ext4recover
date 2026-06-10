@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include "recovered_intervals.h"
 #include "fs_capabilities.h"
+#include "journal_index.h"
 
 #define RECOVER_DIR "./RECOVER"
 #define VERSION "0.5"
@@ -91,6 +92,8 @@ struct recover_context {
     blk64_t journal_start;
     blk64_t journal_len;
     int has_journal;
+    ext2_file_t journal_file;   /* B1: cached handle, opened once */
+    struct journal_index *jindex; /* B2: fs_block -> journal copies */
     
     /* Filename mapping */
     struct filename_entry *filename_map;
