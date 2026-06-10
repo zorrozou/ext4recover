@@ -79,11 +79,35 @@ int init_filename_map(struct recover_context *ctx)
 }
 
 /*
+ * A3: sanitize a directory-entry name before it can reach a path
+ * concatenation. Journal dir-block parsing is heuristic, so names may
+ * come from corrupted or hostile data: a '/' or ".." would escape the
+ * recovery directory entirely (path traversal).
+ * Returns 1 if the name is safe to use, 0 to reject.
+ */
+static int filename_is_safe(const char *name)
+{
+    if (!name || name[0] == '\0')
+        return 0;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return 0;
+    for (const char *p = name; *p; p++) {
+        if (*p == '/')
+            return 0;
+    }
+    return 1;
+}
+
+/*
  * Add a filename mapping
  */
 int add_filename_mapping(struct recover_context *ctx, __u32 inode, const char *name)
 {
     if (!ctx->filename_map)
+        return -1;
+
+    /* A3: never let unsafe names enter the map */
+    if (!filename_is_safe(name))
         return -1;
     
     /* Check for duplicates (update if exists) */
@@ -144,6 +168,65 @@ void free_filename_map(struct recover_context *ctx)
     }
     ctx->filename_count = 0;
     ctx->filename_capacity = 0;
+    free(ctx->name_claims);
+    ctx->name_claims = NULL;
+    ctx->claim_count = 0;
+    ctx->claim_capacity = 0;
+}
+
+/*
+ * A4: resolve the final output basename for an inode.
+ *
+ * Two different inodes can map to the same basename (same filename in
+ * different directories). Previously the second one was silently
+ * skipped (create path) or overwrote the first (journal rename path).
+ * Now: the first inode to claim a basename owns it; later inodes are
+ * diverted to "<ino>_file". Idempotent: the same inode always
+ * resolves to the same answer within a run.
+ */
+const char *resolve_output_name(struct recover_context *ctx, __u32 ino,
+                                char *buf, size_t bufsize)
+{
+    const char *name = get_filename_for_inode(ctx, ino);
+
+    if (name) {
+        /* existing claim? */
+        int i;
+        for (i = 0; i < ctx->claim_count; i++) {
+            if (strncmp(ctx->name_claims[i].name, name, 255) == 0) {
+                if (ctx->name_claims[i].ino == ino) {
+                    snprintf(buf, bufsize, "%s", name);
+                    return buf;     /* we own it */
+                }
+                name = NULL;        /* owned by another inode: divert */
+                break;
+            }
+        }
+        if (name && i == ctx->claim_count) {
+            /* unclaimed: claim it now */
+            if (ctx->claim_count >= ctx->claim_capacity) {
+                int ncap = ctx->claim_capacity ? ctx->claim_capacity * 2 : 256;
+                struct name_claim *nc = realloc(ctx->name_claims,
+                                                ncap * sizeof(struct name_claim));
+                if (nc) {
+                    ctx->name_claims = nc;
+                    ctx->claim_capacity = ncap;
+                }
+            }
+            if (ctx->claim_count < ctx->claim_capacity) {
+                ctx->name_claims[ctx->claim_count].ino = ino;
+                snprintf(ctx->name_claims[ctx->claim_count].name,
+                         sizeof(ctx->name_claims[ctx->claim_count].name),
+                         "%s", name);
+                ctx->claim_count++;
+            }
+            snprintf(buf, bufsize, "%s", name);
+            return buf;
+        }
+    }
+
+    snprintf(buf, bufsize, "%u_file", ino);
+    return buf;
 }
 
 /*

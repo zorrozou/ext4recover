@@ -101,8 +101,9 @@ struct journal_scan_state {
     int tag_size;
     /* Track which inodes we already recovered (to pick the best version) */
     __u32 *recovered_inodes;
-    __u64 *recovered_sizes;   /* kept for stats only */
-    __u32 *recovered_seqs;    /* Phase 5: jbd2 h_sequence */
+    __u64 *recovered_sizes;
+    __u32 *recovered_seqs;    /* jbd2 h_sequence of best version */
+    __u8  *recovered_live;    /* 1 = best version was a live (links>0) copy */
     int recovered_count;
     /* Inode table block range */
     blk64_t inode_table_start;
@@ -207,40 +208,62 @@ static int is_inode_table_block(struct journal_scan_state *state, blk64_t fs_blo
 }
 
 /*
- * Check if an inode was already recovered with a LARGER size
- * Returns: 0 if not recovered or current is larger, 1 if already recovered with >= size
+ * Journal version selection (A2 final form).
+ *
+ * A deleted file can appear in the journal as multiple inode copies:
+ *   LIVE copies   (i_links_count > 0): states while the file existed -
+ *                 these carry user-visible versions; newest seq wins
+ *                 (audit-B2 semantics: a truncate+rewrite before the
+ *                 delete must yield the NEW, possibly smaller content).
+ *   ARTIFACT copies (i_links_count == 0): orphan/mid-truncate states
+ *                 journaled BY the deletion itself. ext4_ext_truncate
+ *                 restarts the handle on big files, journaling shrinking
+ *                 extent subsets at HIGHER seq than any live copy. These
+ *                 must never clobber a live recovery; among themselves
+ *                 the largest (least-truncated) one wins.
+ *
+ * Selection table (R = best processed so far, C = candidate):
+ *   C live,     R live     -> process iff C.seq > R.seq
+ *   C live,     R artifact -> process (live supersedes artifacts)
+ *   C artifact, R live     -> skip
+ *   C artifact, R artifact -> process iff C.size > R.size
  */
-static int should_skip_for_seq(struct journal_scan_state *state, __u32 ino, __u32 seq)
+static int should_skip_version(struct journal_scan_state *state, __u32 ino,
+                               __u32 seq, __u64 size, int is_live)
 {
     for (int i = 0; i < state->recovered_count; i++) {
         if (state->recovered_inodes[i] == ino) {
-            if (state->recovered_seqs[i] >= seq)
+            int r_live = state->recovered_live[i];
+            if (is_live && r_live)
+                return state->recovered_seqs[i] >= seq;
+            if (is_live && !r_live)
+                return 0;
+            if (!is_live && r_live)
                 return 1;
-            return 0;
+            return state->recovered_sizes[i] >= size;
         }
     }
     return 0;
 }
 
-static int already_recovered_larger(struct journal_scan_state *state, __u32 ino, __u64 size)
+/* Record a processed version. Live entries supersede artifact entries;
+ * within a family size/seq keep their maxima. size==0 means "output
+ * file unchanged, just update bookkeeping". */
+static void mark_version(struct journal_scan_state *state, __u32 ino,
+                         __u64 size, __u32 seq, int is_live)
 {
     for (int i = 0; i < state->recovered_count; i++) {
         if (state->recovered_inodes[i] == ino) {
-            if (state->recovered_sizes[i] >= size)
-                return 1; /* Already have a better version */
-            else
-                return 0; /* Current is larger, should override */
-        }
-    }
-    return 0;
-}
-
-static void mark_recovered_with_seq(struct journal_scan_state *state, __u32 ino, __u64 size, __u32 seq)
-{
-    for (int i = 0; i < state->recovered_count; i++) {
-        if (state->recovered_inodes[i] == ino) {
-            state->recovered_sizes[i] = size;
-            state->recovered_seqs[i]  = seq;
+            if (is_live && !state->recovered_live[i]) {
+                state->recovered_live[i]  = 1;
+                state->recovered_sizes[i] = size;
+                state->recovered_seqs[i]  = seq;
+                return;
+            }
+            if (size > state->recovered_sizes[i])
+                state->recovered_sizes[i] = size;
+            if (seq > state->recovered_seqs[i])
+                state->recovered_seqs[i] = seq;
             return;
         }
     }
@@ -248,22 +271,7 @@ static void mark_recovered_with_seq(struct journal_scan_state *state, __u32 ino,
         state->recovered_inodes[state->recovered_count] = ino;
         state->recovered_sizes[state->recovered_count]  = size;
         state->recovered_seqs[state->recovered_count]   = seq;
-        state->recovered_count++;
-    }
-}
-
-static void mark_recovered(struct journal_scan_state *state, __u32 ino, __u64 size)
-{
-    /* Update existing or add new */
-    for (int i = 0; i < state->recovered_count; i++) {
-        if (state->recovered_inodes[i] == ino) {
-            state->recovered_sizes[i] = size;
-            return;
-        }
-    }
-    if (state->recovered_count < MAX_RECOVERED_INODES) {
-        state->recovered_inodes[state->recovered_count] = ino;
-        state->recovered_sizes[state->recovered_count] = size;
+        state->recovered_live[state->recovered_count]   = is_live ? 1 : 0;
         state->recovered_count++;
     }
 }
@@ -305,7 +313,7 @@ static int recover_inode_from_journal(struct recover_context *ctx,
     struct ext3_extent *ee;
     int fd;
     int retval;
-    char filename[256];
+    char filename[512];
     
     eh = (struct ext3_extent_header *)jinode->i_block;
     
@@ -358,14 +366,56 @@ static int recover_inode_from_journal(struct recover_context *ctx,
             LOG_DEBUG(ctx, "Multi-level inode %u: no valid child blocks on disk, skipping", ino);
             return -1;
         }
+
+        /* A2: fully-covered pre-check — ARTIFACT copies only. A live
+         * copy may legitimately reuse the same physical blocks for new
+         * content (truncate+rewrite), so live copies always rewrite.
+         * Artifacts never carry content beyond what's already dumped. */
+        if (jinode->i_links_count == 0 && ctx->recovered_extents) {
+            int total_pre = 0, fully_pre = 0;
+            struct ext3_extent_idx *idx_pre = (struct ext3_extent_idx *)(eh + 1);
+            for (int i = 0; i < entries; i++, idx_pre++) {
+                blk64_t child_blk = ext2fs_le32_to_cpu(idx_pre->ei_leaf) +
+                    ((__u64)ext2fs_le16_to_cpu(idx_pre->ei_leaf_hi) << 32);
+                if (child_blk == 0 || child_blk >= ctx->total_blocks) continue;
+                char *pbuf;
+                if (ext2fs_get_mem(ctx->blocksize, &pbuf)) continue;
+                if (pread(ctx->device_fd, pbuf, ctx->blocksize,
+                          (off_t)child_blk * ctx->blocksize) != ctx->blocksize) {
+                    ext2fs_free_mem(&pbuf);
+                    continue;
+                }
+                struct ext3_extent_header *peh = (struct ext3_extent_header *)pbuf;
+                if (ext2fs_le16_to_cpu(peh->eh_magic) == EXT4_EXT_MAGIC &&
+                    peh->eh_depth == 0) {
+                    struct ext3_extent *pee = (struct ext3_extent *)(peh + 1);
+                    int pn = ext2fs_le16_to_cpu(peh->eh_entries);
+                    for (int j = 0; j < pn; j++, pee++) {
+                        __u16 plen = ext2fs_le16_to_cpu(pee->ee_len);
+                        __u64 pst = ((__u64)ext2fs_le16_to_cpu(pee->ee_start_hi) << 32) +
+                                    ext2fs_le32_to_cpu(pee->ee_start);
+                        if (plen > 32768) plen -= 32768;
+                        if (plen == 0 || pst == 0) continue;
+                        total_pre++;
+                        if (intervals_query(ctx->recovered_extents,
+                                            (uint64_t)pst, (uint64_t)plen) == 1)
+                            fully_pre++;
+                    }
+                }
+                ext2fs_free_mem(&pbuf);
+            }
+            if (total_pre > 0 && fully_pre == total_pre) {
+                ctx->dedup_skipped++;
+                LOG_DEBUG(ctx, "Journal multi-level inode %u fully covered, skip", ino);
+                return 1;   /* processed; existing output kept */
+            }
+        }
         
         /* Write to temp file first - only promote to main file if larger */
-        char filename_ml[256], tmpname_ml[256];
-        const char *fname_ml = get_filename_for_inode(ctx, ino);
-        if (fname_ml)
-            snprintf(filename_ml, sizeof(filename_ml), "%s/%s", ctx->recover_dir, fname_ml);
-        else
-            snprintf(filename_ml, sizeof(filename_ml), "%s/%u_file", ctx->recover_dir, ino);
+        char filename_ml[512], tmpname_ml[512];
+        char base_ml[300];
+        resolve_output_name(ctx, ino, base_ml, sizeof(base_ml));
+        snprintf(filename_ml, sizeof(filename_ml), "%s/%s", ctx->recover_dir, base_ml);
         snprintf(tmpname_ml, sizeof(tmpname_ml), "%s/.%u_tmp", ctx->recover_dir, ino);
         int fd_ml = open(tmpname_ml, O_CREAT | O_WRONLY | O_TRUNC | O_LARGEFILE, 0640);
         if (fd_ml < 0) {
@@ -464,10 +514,17 @@ static int recover_inode_from_journal(struct recover_context *ctx,
         if (recovered_blocks_ml > 0) {
             __u64 orig_size = ((__u64)jinode->i_size_high << 32) | jinode->i_size;
             if (orig_size > 0 && orig_size < (__u64)recovered_blocks_ml * ctx->blocksize) {
-                truncate(tmpname_ml, orig_size);
+                if (truncate(tmpname_ml, orig_size) != 0)
+                    LOG_DEBUG(ctx, "truncate(%s) failed: %s", tmpname_ml, strerror(errno));
             }
-            /* Phase 5 fix: same as depth=0 path - unconditional replace. */
-            rename(tmpname_ml, filename_ml);
+            /* Selection layer (should_skip_version) already decided this
+             * version must win; replace unconditionally (audit-B2). */
+            if (rename(tmpname_ml, filename_ml) != 0) {
+                LOG_ERROR("rename(%s -> %s) failed: %s", tmpname_ml, filename_ml,
+                         strerror(errno));
+                unlink(tmpname_ml);
+                return -1;
+            }
             LOG_INFO("Journal recovered inode %u (multi-level depth=%u): %d blocks (%llu bytes) -> %s",
                     ino, depth, recovered_blocks_ml, (unsigned long long)orig_size, filename_ml);
             ctx->journal_recovered++;
@@ -479,8 +536,8 @@ static int recover_inode_from_journal(struct recover_context *ctx,
     }
     
     /* Depth == 0: leaf extents are directly in inode */
-    /* Pre-check: if every extent already covered, skip */
-    if (ctx->recovered_extents) {
+    /* A2 pre-check: artifact copies only (see multi-level comment). */
+    if (jinode->i_links_count == 0 && ctx->recovered_extents) {
         struct ext3_extent *pe = (struct ext3_extent *)(eh + 1);
         int total = 0, fully = 0;
         for (int k = 0; k < entries; k++, pe++) {
@@ -496,16 +553,14 @@ static int recover_inode_from_journal(struct recover_context *ctx,
         }
         if (total > 0 && fully == total) {
             LOG_DEBUG(ctx, "Journal leaf for inode %u fully covered, skip", ino);
-            return 0;
+            return 1;   /* processed; existing output kept */
         }
     }
     /* Write to temp file, promote only if larger than existing */
-    char tmpname[256];
-    const char *fname_d0 = get_filename_for_inode(ctx, ino);
-    if (fname_d0)
-        snprintf(filename, sizeof(filename), "%s/%s", ctx->recover_dir, fname_d0);
-    else
-        snprintf(filename, sizeof(filename), "%s/%u_file", ctx->recover_dir, ino);
+    char tmpname[512];
+    char base_d0[300];
+    resolve_output_name(ctx, ino, base_d0, sizeof(base_d0));
+    snprintf(filename, sizeof(filename), "%s/%s", ctx->recover_dir, base_d0);
     snprintf(tmpname, sizeof(tmpname), "%s/.%u_d0tmp", ctx->recover_dir, ino);
     fd = open(tmpname, O_CREAT | O_WRONLY | O_TRUNC | O_LARGEFILE, 0640);
     if (fd < 0) {
@@ -555,14 +610,17 @@ static int recover_inode_from_journal(struct recover_context *ctx,
         /* Truncate to original file size if known */
         __u64 orig_size = ((__u64)jinode->i_size_high << 32) | jinode->i_size;
         if (orig_size > 0 && orig_size < (__u64)recovered_blocks * ctx->blocksize) {
-            truncate(tmpname, orig_size);
+            if (truncate(tmpname, orig_size) != 0)
+                LOG_DEBUG(ctx, "truncate(%s) failed: %s", tmpname, strerror(errno));
         }
-        
-        /* Phase 5 fix: should_skip_for_seq() at the caller ensures only
-         * newer-or-first-seen jbd2 transaction sequences ever reach here.
-         * So we unconditionally replace any existing dump - this is the
-         * point of seq-aware selection. */
-        rename(tmpname, filename);
+
+        /* Selection layer already decided; replace unconditionally. */
+        if (rename(tmpname, filename) != 0) {
+            LOG_ERROR("rename(%s -> %s) failed: %s", tmpname, filename,
+                     strerror(errno));
+            unlink(tmpname);
+            return -1;
+        }
         LOG_INFO("Journal recovered inode %u: %d blocks (%llu bytes) -> %s",
                 ino, recovered_blocks, (unsigned long long)orig_size, filename);
         ctx->journal_recovered++;
@@ -636,19 +694,26 @@ static int process_inode_table_block(struct journal_scan_state *state,
         if (!is_deleted)
             continue;
         
-        /* Phase 5: seq-aware. Skip only if equal-or-newer version recorded. */
-        if (should_skip_for_seq(state, ino, seq))
+        /* Version selection: live copies beat artifacts; see table at
+         * should_skip_version(). is_live = the JOURNAL COPY's links. */
+        int is_live = jinode->i_links_count > 0;
+        if (should_skip_version(state, ino, seq, file_size, is_live))
             continue;
-        
-        LOG_DEBUG(ctx, "Found deleted inode %u in journal (seq=%u size=%llu entries=%u depth=%u)",
+
+        LOG_DEBUG(ctx, "Found deleted inode %u in journal (seq=%u size=%llu entries=%u depth=%u links=%u)",
                  ino, seq, (unsigned long long)file_size,
                  ext2fs_le16_to_cpu(eh->eh_entries),
-                 ext2fs_le16_to_cpu(eh->eh_depth));
-        
-        /* Try to recover. O_TRUNC re-open overwrites older-seq version. */
-        if (recover_inode_from_journal(ctx, ino, jinode) == 0) {
-            mark_recovered_with_seq(state, ino, file_size, seq);
+                 ext2fs_le16_to_cpu(eh->eh_depth),
+                 jinode->i_links_count);
+
+        /* Try to recover. Return: 0 = output (re)written, 1 = processed
+         * but existing output kept (redundant version). */
+        int r = recover_inode_from_journal(ctx, ino, jinode);
+        if (r == 0) {
+            mark_version(state, ino, file_size, seq, is_live);
             recovered++;
+        } else if (r == 1) {
+            mark_version(state, ino, 0, seq, is_live);
         }
     }
     
@@ -814,18 +879,21 @@ int recover_from_journal(struct recover_context *ctx)
     state.recovered_inodes = calloc(MAX_RECOVERED_INODES, sizeof(__u32));
     state.recovered_sizes = calloc(MAX_RECOVERED_INODES, sizeof(__u64));
     state.recovered_seqs  = calloc(MAX_RECOVERED_INODES, sizeof(__u32));
-    if (!state.recovered_inodes || !state.recovered_sizes || !state.recovered_seqs) {
+    state.recovered_live  = calloc(MAX_RECOVERED_INODES, sizeof(__u8));
+    if (!state.recovered_inodes || !state.recovered_sizes ||
+        !state.recovered_seqs || !state.recovered_live) {
         LOG_ERROR("Failed to allocate inode tracking array");
         free(state.recovered_inodes);
         free(state.recovered_sizes); free(state.recovered_seqs);
+        free(state.recovered_live);
         return -1;
     }
     
     retval = ext2fs_get_mem(ctx->blocksize, &desc_buf);
-    if (retval) { free(state.recovered_inodes); free(state.recovered_sizes); free(state.recovered_seqs); return -1; }
-    
+    if (retval) { free(state.recovered_inodes); free(state.recovered_sizes); free(state.recovered_seqs); free(state.recovered_live); return -1; }
+
     retval = ext2fs_get_mem(ctx->blocksize, &data_buf);
-    if (retval) { ext2fs_free_mem(&desc_buf); free(state.recovered_inodes); free(state.recovered_sizes); free(state.recovered_seqs); return -1; }
+    if (retval) { ext2fs_free_mem(&desc_buf); free(state.recovered_inodes); free(state.recovered_sizes); free(state.recovered_seqs); free(state.recovered_live); return -1; }
     
     LOG_INFO("Starting journal recovery scan...");
     LOG_INFO("Scanning %llu journal blocks (brute-force, ignoring sequence)",
@@ -946,6 +1014,7 @@ int recover_from_journal(struct recover_context *ctx)
     ext2fs_free_mem(&data_buf);
     free(state.recovered_inodes);
     free(state.recovered_sizes); free(state.recovered_seqs);
+    free(state.recovered_live);
     free_itable_map();
 
     return 0;

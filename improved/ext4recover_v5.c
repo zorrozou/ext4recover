@@ -50,22 +50,24 @@ int recover_block_to_file(int devfd, int inofd, __le32 block, __le16 len,
      * not the extent addressing format. */
     blk64_t phys_block = start;
     blk64_t block_len = len;
-    
-    /* Cross-phase dedup: if these physical blocks were already dumped,
-     * skip to avoid producing redundant copies. */
-    if (ctx && ctx->recovered_extents) {
-        int q = intervals_query(ctx->recovered_extents,
-                                (uint64_t)phys_block, (uint64_t)block_len);
-        if (q == 1) {
-            ctx->dedup_skipped++;
-            ctx->dedup_skipped_blocks += block_len;
-            LOG_DEBUG(ctx, "  dedup-skip extent phys=%llu len=%llu",
-                     (unsigned long long)phys_block,
-                     (unsigned long long)block_len);
-            return 1; /* treat as success - data already on disk */
-        }
-    }
-    
+
+    /*
+     * A2: NO per-extent dedup skip here.
+     *
+     * The old code returned "success" without writing when these
+     * physical blocks were already dumped ANYWHERE — but the data may
+     * live in a *different* output file (or an older version of this
+     * one), so the current file silently got a zero hole. Worst case
+     * observed on a real disk: a higher-seq journal re-recovery of the
+     * same inode dedup-skipped every extent and renamed an EMPTY temp
+     * file over the previously good output.
+     *
+     * Whole-file redundancy is still eliminated by the fully-covered
+     * pre-checks at the call sites (journal depth0/multi-level,
+     * aggressive leaf/tree) BEFORE any output file is touched; those
+     * carry all of the measured T-DEDUP-2 benefit. Once we decide to
+     * write a file, every extent is written for real.
+     */
     size_t chunk_bytes = (size_t)RBTF_CHUNK_BLOCKS * blocksize;
     char *buf = malloc(chunk_bytes);
     if (!buf) {
@@ -123,15 +125,12 @@ int recover_block_to_file(int devfd, int inofd, __le32 block, __le16 len,
 int create_recovery_file(struct recover_context *ctx, __u32 ino, int *fd_out)
 {
     char filename[512];
-    const char *original_name = get_filename_for_inode(ctx, ino);
-    
-    if (original_name) {
-        snprintf(filename, sizeof(filename), "%s/%s", 
-                ctx->recover_dir, original_name);
-    } else {
-        snprintf(filename, sizeof(filename), "%s/%u_file", 
-                ctx->recover_dir, ino);
-    }
+    char base[300];
+
+    /* A4: collision-safe name resolution (first claimant keeps the
+     * original basename; later same-named inodes get "<ino>_file"). */
+    resolve_output_name(ctx, ino, base, sizeof(base));
+    snprintf(filename, sizeof(filename), "%s/%s", ctx->recover_dir, base);
     
     /* Don't overwrite existing recovered files that have data */
     struct stat existing;
@@ -221,15 +220,23 @@ static int extent_tree_travel(struct recover_context *ctx,
     
     buf = malloc(ctx->blocksize);
     if (!buf) return 0;
-    
+
     ei = EXT_FIRST_INDEX(eh);
     for (i = 0; i < ext2fs_le16_to_cpu(eh->eh_entries); i++, ei++) {
         blk = ((__u64)ext2fs_le16_to_cpu(ei->ei_leaf_hi) << 32) +
               (__u64)ext2fs_le32_to_cpu(ei->ei_leaf);
-        
+
         /* ext4 extent index addresses are always in blocks, even with bigalloc */
-        
-        if (pread(ctx->device_fd, buf, ctx->blocksize, 
+
+        /* A4: bound-check the index pointer; residual/garbage slots can
+         * hold anything. Skip bad entries instead of dereferencing. */
+        if (blk < 1 || blk >= (__u64)ctx->total_blocks) {
+            LOG_DEBUG(ctx, "  idx %d: leaf block %llu out of range, skip",
+                     i, (unsigned long long)blk);
+            continue;
+        }
+
+        if (pread(ctx->device_fd, buf, ctx->blocksize,
                   (off_t)blk * ctx->blocksize) != ctx->blocksize) {
             free(buf);
             return 0;
@@ -277,6 +284,13 @@ int recover_from_extent_tree(struct recover_context *ctx, __u32 ino,
     eh = (struct ext3_extent_header *)handle_inode.i_block;
     int depth = ext2fs_le16_to_cpu(eh->eh_depth);
     int entries = ext2fs_le16_to_cpu(eh->eh_entries);
+
+    /* A4: ext4 trees never exceed depth 5; anything larger is garbage
+     * from a cleared/corrupt inode and would drive deep recursion. */
+    if (depth > 5) {
+        ext2fs_extent_free(handle);
+        return -1;
+    }
     
     /*
      * Even if entries==0 in the cleared inode, the original ext4recover
@@ -344,9 +358,9 @@ int recover_from_extent_tree(struct recover_context *ctx, __u32 ino,
     if (!ret) {
         struct stat st;
         char fname[512];
-        const char *name = get_filename_for_inode(ctx, ino);
-        if (name) snprintf(fname, sizeof(fname), "%s/%s", ctx->recover_dir, name);
-        else snprintf(fname, sizeof(fname), "%s/%u_file", ctx->recover_dir, ino);
+        char base2[300];
+        resolve_output_name(ctx, ino, base2, sizeof(base2));
+        snprintf(fname, sizeof(fname), "%s/%s", ctx->recover_dir, base2);
         if (stat(fname, &st) == 0 && st.st_size > 0) {
             ret = 1; /* partial recovery counts as success */
         }

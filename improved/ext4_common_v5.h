@@ -51,6 +51,14 @@ struct filename_entry {
     char name[256];
 };
 
+/* A4: output-name claim registry. First inode to ask for a basename
+ * owns it; later inodes mapping to the same basename are diverted to
+ * "<ino>_file" instead of being silently skipped / overwriting. */
+struct name_claim {
+    __u32 ino;
+    char name[256];
+};
+
 /* Global context structure */
 struct recover_context {
     ext2_filsys fs;
@@ -88,6 +96,11 @@ struct recover_context {
     struct filename_entry *filename_map;
     int filename_count;
     int filename_capacity;
+
+    /* A4: output-name claims (collision diversion) */
+    struct name_claim *name_claims;
+    int claim_count;
+    int claim_capacity;
     
     /* Already-recovered physical block intervals (cross-phase dedup) */
     struct recovered_intervals *recovered_extents;
@@ -184,6 +197,11 @@ int add_filename_mapping(struct recover_context *ctx, __u32 inode, const char *n
 const char* get_filename_for_inode(struct recover_context *ctx, __u32 inode);
 void parse_directory_blocks(struct recover_context *ctx);
 void free_filename_map(struct recover_context *ctx);
+
+/* A4: resolve final output basename for an inode, with collision
+ * diversion. Fills buf and returns it. Idempotent per inode. */
+const char *resolve_output_name(struct recover_context *ctx, __u32 ino,
+                                char *buf, size_t bufsize);
 
 /* Function prototypes - checkpoint/resume */
 int save_checkpoint(struct recover_context *ctx);
