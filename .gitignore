@@ -22,4 +22,5 @@ bgrep_non_zero
 
 # test artifacts
 /tmp_*
+*.log
 *.log.tmp

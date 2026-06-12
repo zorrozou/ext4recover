@@ -1,9 +1,0 @@
-[INFO] Journal recovered inode 12: 25600 blocks (104857600 bytes) -> /mnt/work/recover_out/tdedup2/big
-[INFO] Found orphaned extent leaf block at 524432, entries=5
-[INFO] Recovered 5 extents from block 524432 to /mnt/work/recover_out/tdedup2/aggressive_524432
-[INFO] Found orphaned extent leaf block at 524448, entries=5
-[INFO] Found orphaned extent leaf block at 67141631, entries=8
-[INFO] Recovered 8 extents from block 67141631 to /mnt/work/recover_out/tdedup2/aggressive_67141631
-[INFO] Found orphaned extent leaf block at 67633136, entries=8
-[INFO] Recovered 8 extents from block 67633136 to /mnt/work/recover_out/tdedup2/aggressive_67633136
-[INFO] Found orphaned extent leaf block at 67633161, entries=5
